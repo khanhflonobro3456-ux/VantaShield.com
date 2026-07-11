@@ -34,7 +34,7 @@ app.use('/app/:name', (req, res) => {
         `);
     }
 
-    // Proxy request
+    // Proxy request tới port nội bộ
     const targetPath = req.url || '/';
     const options = {
         hostname: '127.0.0.1',
@@ -91,6 +91,7 @@ if (fs.existsSync(APIS_FILE)) {
     saveApis();
 }
 
+// Master Admin Default
 if (!usersDb.has('master1')) {
     usersDb.set('master1', { password: 'duykhanh2014' });
     saveUsers();
@@ -192,14 +193,13 @@ body.mobf-root {
 .field-label { font-size: 13px; letter-spacing: 2px; text-transform: uppercase; color: var(--vs-purple); font-weight: bold; margin: 0 0 10px 0; display: block;}
 
 .quick-card input[type="text"], .quick-card input[type="password"] { width: 100%; padding: 14px; background: rgba(0,0,0,0.7); border: 1px solid rgba(168, 85, 247, 0.3); border-radius: 10px; color: var(--vs-cyan); font-family: "JetBrains Mono", monospace; font-size: 14px; box-sizing: border-box; outline: none; transition: all .3s; margin-bottom: 20px; }
-.quick-card input:focus { border-color: var(--vs-cyan); box-shadow: 0 0 15px rgba(6, 182, 212, 0.2); }
+.quick-card input:focus, .quick-card textarea:focus { border-color: var(--vs-cyan); box-shadow: 0 0 15px rgba(6, 182, 212, 0.2); }
 
 .btn-upload { background: rgba(168, 85, 247, 0.1); color: var(--vs-cyan); border: 1px dashed var(--vs-purple); padding: 10px 15px; border-radius: 8px; font-size: 12px; cursor: pointer; transition: all 0.3s; font-family: "Orbitron"; display: inline-block; font-weight: bold; }
 .btn-upload:hover { background: rgba(168, 85, 247, 0.4); color: #fff; }
 input[type="file"] { display: none; }
 
 .quick-card textarea { width: 100%; height: 250px; background: rgba(0,0,0,0.7); border: 1px solid rgba(168, 85, 247, 0.3); border-radius: 10px; color: var(--vs-cyan); font-family: "JetBrains Mono", monospace; font-size: 13px; padding: 14px; box-sizing: border-box; outline: none; transition: all .3s; resize: none; margin-bottom: 15px; }
-.quick-card textarea:focus { border-color: var(--vs-cyan); box-shadow: 0 0 15px rgba(6, 182, 212, 0.2); }
 
 .btn-save { width: 100%; padding: 16px; border: none; border-radius: 12px; font-family: "Orbitron"; font-size: 15px; font-weight: 700; letter-spacing: 2px; cursor: pointer; color: #fff; background: linear-gradient(135deg, var(--vs-cyan), var(--vs-purple), var(--vs-pink)); background-size: 200% 200%; animation: gradShift 4s ease infinite; transition: all .2s; text-decoration:none; display:block; text-align:center; box-sizing:border-box;}
 .btn-save:hover { transform: translateY(-2px); box-shadow: 0 8px 30px rgba(168, 85, 247, 0.4); }
@@ -425,7 +425,7 @@ const baseHTML = (content, userSession = null) => {
 
     <main>${content}</main>
 
-    <!-- LOADING OVERLAY -->
+    <!-- LOADING OVERLAY CHO TẠO WEB -->
     <div id="loader-overlay">
         <div class="terminal-window">
             <div class="terminal-header">
@@ -442,11 +442,11 @@ const baseHTML = (content, userSession = null) => {
 `};
 
 // ============================================================================
-// 2. CREATE WEB (TẠO WEB BẰNG PACKAGE & SERVER TRỰC TIẾP TẠI WEB)
+// 2. CREATE WEB (GÓI GỌN CẢ GITHUB VÀ TẠO BẰNG TAY)
 // ============================================================================
 app.get('/api-hosting', (req, res) => {
     const user = getCookie(req, 'user_session');
-    if (!user) return res.redirect('/login?error=Bạn cần đăng nhập để tạo Web.');
+    if (!user) return res.redirect('/login?error=Bạn cần đăng nhập để sử dụng API Hosting.');
 
     const isAdmin = user === 'master1';
     let rowsHtml = '';
@@ -479,27 +479,44 @@ app.get('/api-hosting', (req, res) => {
 
     res.send(baseHTML(`
         <section class="hero">
-            <div class="hero-badge" style="border-color: var(--vs-gold); color: var(--vs-gold); background: rgba(234, 179, 8, 0.1);">VANTASHIELD CLOUD</div>
+            <div class="hero-badge" style="border-color: var(--vs-gold); color: var(--vs-gold); background: rgba(234, 179, 8, 0.1);">VANTASHIELD CLOUD PLATFORM</div>
             <h1><span class="line2">TẠO WEB (HOSTING)</span></h1>
-            <p style="color:#a1a1aa; font-family:'JetBrains Mono'; font-size:14px;">Khởi tạo dự án Node.js trực tiếp trên web với URL tùy chỉnh.</p>
+            <p style="color:#a1a1aa; font-family:'JetBrains Mono'; font-size:14px;">Khởi tạo API/Web từ kho Github hoặc tạo thủ công với Proxy bảo mật.</p>
         </section>
 
         ${msg ? `<div class="center-card-wrap"><div class="alert alert-success">${escapeHTML(msg)}</div></div>` : ''}
 
-        <div class="center-card-wrap" style="max-width: 900px;">
+        <div class="center-card-wrap" style="max-width: 1000px; display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 20px;">
+            
+            <!-- OPTION 1: DEPLOY FROM GITHUB -->
+            <div class="quick-card" style="padding: 25px;">
+                <div class="field-label" style="color: var(--vs-cyan); font-size: 15px; margin-bottom: 20px; text-align:center;">
+                    <span style="font-size: 20px;">🔗</span> DEPLOY TỪ GITHUB
+                </div>
+                <form id="githubForm" onsubmit="handleAjaxDeploy(event, 'github')">
+                    <label class="field-label">TÊN DỰ ÁN WEB</label>
+                    <input type="text" name="project_name" placeholder="vidu: my-github-web" required pattern="[a-z0-9-]+" title="Chữ thường, số và gạch ngang">
+                    
+                    <label class="field-label">LINK KHO GITHUB (Public)</label>
+                    <input type="text" name="repo_url" placeholder="https://github.com/user/repo.git" required>
+                    
+                    <p style="font-size: 11px; color: #a1a1aa; margin-top: -5px; margin-bottom: 15px;">Hệ thống sẽ tự động git clone, chạy npm install và start server.js.</p>
+                    
+                    <button type="submit" class="btn-save" style="background: linear-gradient(135deg, #2ea043, #238636); margin-top: 10px;">DEPLOY TỪ GITHUB</button>
+                </form>
+            </div>
+
+            <!-- OPTION 2: CREATE DIRECTLY -->
             <div class="quick-card" style="padding: 25px;">
                 <div class="field-label" style="color: var(--vs-purple); font-size: 15px; margin-bottom: 20px; text-align:center;">
-                    <span style="font-size: 22px;">⚡</span> KHỞI TẠO DỰ ÁN MỚI
+                    <span style="font-size: 20px;">⚡</span> TẠO TRỰC TIẾP TẠI WEB
                 </div>
-                
-                <form id="deployForm" onsubmit="handleAjaxDeploy(event)">
-                    <label class="field-label">TÊN DỰ ÁN (SẼ THÀNH LINK WEB CỦA BẠN)</label>
-                    <input type="text" name="project_name" placeholder="vidu: web-ban-hang-cua-toi" required pattern="[a-z0-9-]+" title="Chỉ dùng chữ thường, số và dấu gạch ngang (không dấu cách)">
+                <form id="manualForm" onsubmit="handleAjaxDeploy(event, 'manual')">
+                    <label class="field-label">TÊN DỰ ÁN WEB</label>
+                    <input type="text" name="project_name" placeholder="vidu: my-local-web" required pattern="[a-z0-9-]+" title="Chữ thường, số và gạch ngang">
                     
-                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom:20px;">
-                        <div>
-                            <label class="field-label" style="color: var(--vs-cyan);">package.json</label>
-                            <textarea name="pkg_json" style="height: 250px; font-family: 'JetBrains Mono';">{
+                    <label class="field-label" style="color: var(--vs-cyan);">package.json</label>
+                    <textarea name="pkg_json" style="height: 100px; font-family: 'JetBrains Mono'; margin-bottom: 15px;">{
   "name": "my-web",
   "version": "1.0.0",
   "main": "server.js",
@@ -507,30 +524,22 @@ app.get('/api-hosting', (req, res) => {
     "express": "^4.19.2"
   }
 }</textarea>
-                        </div>
-                        <div>
-                            <label class="field-label" style="color: var(--vs-gold);">server.js</label>
-                            <textarea name="srv_js" style="height: 250px; font-family: 'JetBrains Mono';">const express = require('express');
-const app = express();
-
-app.get('/', (req, res) => {
-    res.send('<h1>Web tạo thành công!</h1><p>Đang chạy trên VantaShield Cloud</p>');
-});
-
-// Port tự động được cấp bởi hệ thống
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log('Server is running!'));</textarea>
-                        </div>
-                    </div>
                     
-                    <button type="submit" class="btn-save">TIẾN HÀNH TẠO WEB & KHỞI CHẠY</button>
+                    <label class="field-label" style="color: var(--vs-gold);">server.js</label>
+                    <textarea name="srv_js" style="height: 150px; font-family: 'JetBrains Mono'; margin-bottom: 15px;">const express = require('express');
+const app = express();
+app.get('/', (req, res) => res.send('<h1>Web tạo thành công!</h1>'));
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log('Running'));</textarea>
+                    
+                    <button type="submit" class="btn-save">TIẾN HÀNH TẠO WEB BẰNG TAY</button>
                 </form>
             </div>
         </div>
 
-        <div class="center-card-wrap" style="max-width: 900px;">
+        <div class="center-card-wrap" style="max-width: 1000px;">
             <div class="quick-card">
-                <div class="field-label" style="margin-bottom: 15px;">CÁC WEB ĐANG HOẠT ĐỘNG</div>
+                <div class="field-label" style="margin-bottom: 15px;">CÁC WEB ĐANG HOẠT ĐỘNG CỦA BẠN</div>
                 <div class="manage-wrap">
                     <table class="manage-table">
                         <thead>
@@ -538,7 +547,7 @@ app.listen(PORT, () => console.log('Server is running!'));</textarea>
                                 <th>TÊN DỰ ÁN</th>
                                 ${isAdmin ? '<th>CHỦ SỞ HỮU</th>' : ''}
                                 <th>TRẠNG THÁI</th>
-                                <th>ĐƯỜNG DẪN (LINK)</th>
+                                <th>ĐƯỜNG DẪN PROXY</th>
                                 <th>HÀNH ĐỘNG</th>
                             </tr>
                         </thead>
@@ -551,7 +560,7 @@ app.listen(PORT, () => console.log('Server is running!'));</textarea>
         </div>
 
         <script>
-        async function handleAjaxDeploy(e) {
+        async function handleAjaxDeploy(e, type) {
             e.preventDefault();
             const form = e.target;
             const formData = new FormData(form);
@@ -576,12 +585,19 @@ app.listen(PORT, () => console.log('Server is running!'));</textarea>
 
             await appendTerm('> System: Đang kiểm tra dữ liệu đầu vào...', 500);
             await appendTerm('> System: Đang cấp phát thư mục [ ' + data.project_name + ' ]...', 800);
-            await appendTerm('> System: Đang ghi file package.json...', 600);
-            await appendTerm('> System: Đang ghi file server.js...', 600);
-            await appendTerm('> NPM: Đang cài đặt thư viện (có thể mất vài giây) <span class="blink">_</span>', 500);
+            
+            let endpoint = '/api-deploy-ajax';
+            if (type === 'github') {
+                endpoint = '/api-deploy-github-ajax';
+                await appendTerm('> GitHub: Đang tiến hành Clone dữ liệu từ Repo...', 800);
+                await appendTerm('> GitHub: Quá trình clone có thể mất một lúc <span class="blink">_</span>', 1000);
+            } else {
+                await appendTerm('> System: Đang khởi tạo file package.json & server.js...', 600);
+                await appendTerm('> NPM: Đang cài đặt thư viện <span class="blink">_</span>', 500);
+            }
 
             try {
-                const response = await fetch('/api-deploy-ajax', {
+                const response = await fetch(endpoint, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify(data)
@@ -591,10 +607,10 @@ app.listen(PORT, () => console.log('Server is running!'));</textarea>
                 
                 if (result.success) {
                     await appendTerm('<span style="color:var(--vs-green);">> NPM: Cài đặt hoàn tất!</span>', 0);
-                    await appendTerm('> Server: Đang khởi động Node.js...', 800);
+                    await appendTerm('> Server: Đang khởi động Node.js backend...', 800);
                     await appendTerm('<br><span style="color:var(--vs-gold); font-size:16px; font-weight:bold;">[ TẠO WEB THÀNH CÔNG ]</span>', 800);
-                    await appendTerm('Link truy cập nội bộ: ' + window.location.origin + '/app/' + result.name, 500);
-                    await appendTerm('Hệ thống sẽ tự động tải lại trang sau 3 giây...', 1000);
+                    await appendTerm('Link proxy: ' + window.location.origin + '/app/' + result.name, 500);
+                    await appendTerm('Hệ thống tải lại trang sau 3 giây...', 1000);
                     
                     setTimeout(() => {
                         window.location.href = '/api-hosting?msg=Tạo web thành công!';
@@ -611,6 +627,7 @@ app.listen(PORT, () => console.log('Server is running!'));</textarea>
     `, user));
 });
 
+// AJAX Handler cho "TẠO BẰNG TAY"
 app.post('/api-deploy-ajax', async (req, res) => {
     const user = getCookie(req, 'user_session');
     if (!user) return res.json({ success: false, message: 'Bạn chưa đăng nhập.' });
@@ -620,7 +637,7 @@ app.post('/api-deploy-ajax', async (req, res) => {
     if (!project_name) return res.json({ success: false, message: 'Tên dự án không hợp lệ.' });
 
     let nameExists = Array.from(apisDb.values()).some(api => api.name === project_name);
-    if (nameExists) return res.json({ success: false, message: 'Tên dự án này đã tồn tại, vui lòng chọn tên khác!' });
+    if (nameExists) return res.json({ success: false, message: 'Tên dự án này đã tồn tại!' });
 
     const apiId = crypto.randomBytes(4).toString('hex');
     const port = getFreePort();
@@ -633,31 +650,69 @@ app.post('/api-deploy-ajax', async (req, res) => {
         fs.writeFileSync(path.join(apiDir, 'package.json'), pkg_json);
         fs.writeFileSync(path.join(apiDir, 'server.js'), srv_js);
 
-        apisDb.set(apiId, {
-            id: apiId,
-            owner: user,
-            name: project_name,
-            port: port,
-            status: 'OFFLINE', 
-            createdAt: Date.now()
-        });
+        apisDb.set(apiId, { id: apiId, owner: user, name: project_name, port: port, status: 'OFFLINE', createdAt: Date.now() });
         saveApis();
 
         exec('npm install', { cwd: apiDir }, (error, stdout, stderr) => {
-            if (error) {
-                console.error(`[NPM ERROR] ${project_name}:`, stderr);
-                return res.json({ success: false, message: 'Lỗi khi chạy npm install. Kiểm tra lại package.json' });
-            }
+            if (error) return res.json({ success: false, message: 'Lỗi npm install. Kiểm tra package.json' });
             startApiProcess(apiId);
             res.json({ success: true, name: project_name });
         });
-
     } catch (err) {
-        console.error(err);
         res.json({ success: false, message: 'Lỗi hệ thống khi tạo file.' });
     }
 });
 
+// AJAX Handler cho "DEPLOY GITHUB"
+app.post('/api-deploy-github-ajax', async (req, res) => {
+    const user = getCookie(req, 'user_session');
+    if (!user) return res.json({ success: false, message: 'Bạn chưa đăng nhập.' });
+
+    let { project_name, repo_url } = req.body;
+    project_name = project_name.trim().toLowerCase().replace(/[^a-z0-9-]/g, '');
+    if (!project_name) return res.json({ success: false, message: 'Tên dự án không hợp lệ.' });
+    
+    // Bảo vệ và làm sạch URL GitHub
+    repo_url = repo_url.trim().replace(/"/g, ''); 
+    if (!repo_url.startsWith('http') || !repo_url.includes('github.com')) {
+        return res.json({ success: false, message: 'Link Repo GitHub không hợp lệ.' });
+    }
+
+    let nameExists = Array.from(apisDb.values()).some(api => api.name === project_name);
+    if (nameExists) return res.json({ success: false, message: 'Tên dự án này đã tồn tại!' });
+
+    const apiId = crypto.randomBytes(4).toString('hex');
+    const port = getFreePort();
+    const apiDir = path.join(__dirname, 'hosted_apis', apiId);
+
+    try {
+        if (!fs.existsSync(path.join(__dirname, 'hosted_apis'))) fs.mkdirSync(path.join(__dirname, 'hosted_apis'));
+        fs.mkdirSync(apiDir, { recursive: true });
+
+        // Tiến hành Clone Source
+        exec(`git clone "${repo_url}" .`, { cwd: apiDir }, (errClone, stdoutC, stderrC) => {
+            if (errClone) return res.json({ success: false, message: 'Không thể Clone GitHub. Repo có thể bị Private hoặc sai link.' });
+
+            apisDb.set(apiId, { id: apiId, owner: user, name: project_name, port: port, status: 'OFFLINE', createdAt: Date.now() });
+            saveApis();
+
+            // Nếu có package.json thì chạy npm install, không thì chạy thẳng server.js
+            if (fs.existsSync(path.join(apiDir, 'package.json'))) {
+                exec('npm install', { cwd: apiDir }, (error, stdout, stderr) => {
+                    startApiProcess(apiId);
+                    res.json({ success: true, name: project_name });
+                });
+            } else {
+                startApiProcess(apiId);
+                res.json({ success: true, name: project_name });
+            }
+        });
+    } catch (err) {
+        res.json({ success: false, message: 'Lỗi hệ thống khi thiết lập GitHub.' });
+    }
+});
+
+// Hàm Start Process chung cho tất cả
 function startApiProcess(apiId) {
     const api = apisDb.get(apiId);
     if (!api) return;
@@ -677,7 +732,7 @@ function startApiProcess(apiId) {
         saveApis();
 
         child.on('exit', (code) => {
-            console.log(`[API HOSTING] Project ${api.name} (Port ${api.port}) exited with code ${code}`);
+            console.log(`[API HOSTING] Project ${api.name} exited.`);
             if (apisDb.has(apiId)) {
                 let dbApi = apisDb.get(apiId);
                 dbApi.status = 'OFFLINE';
@@ -687,13 +742,8 @@ function startApiProcess(apiId) {
             }
             delete runningProcesses[apiId];
         });
-
-        child.on('error', (err) => {
-            console.error(`[API HOSTING ERROR] Project ${api.name}:`, err);
-        });
-
     } catch(e) {
-        console.error("Lỗi khởi tạo Child Process", e);
+        console.error("Lỗi khởi tạo Process", e);
     }
 }
 
@@ -776,7 +826,6 @@ app.get('/chat-global', (req, res) => {
 // ============================================================================
 // 4. CORE ROUTES (HOME, DASHBOARD, LOGIN, TOS, RAW V1)
 // ============================================================================
-
 app.get('/', (req, res) => {
     const user = getCookie(req, 'user_session');
     res.send(baseHTML(`
