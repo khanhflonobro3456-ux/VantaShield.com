@@ -65,18 +65,16 @@ app.use(express.json({ limit: '50mb' }));
 app.use(express.static(__dirname));
 
 // ============================================================================
-// DATA PERSISTENCE (LƯU TRỮ VÀO FILE) - HOÀN THIỆN
+// DATA PERSISTENCE (LƯU TRỮ VÀO FILE)
 // ============================================================================
 const DB_FILE = './vantashield_scripts.json';
 const USERS_FILE = './vantashield_users.json';
 const APIS_FILE = './vantashield_apis.json';
 const CHAT_FILE = './vantashield_chat.json';
-const JOIN_FILE = './vantashield_joins.json';
 
 let db = new Map();
 let usersDb = new Map();
 let chatDb = { vn: [], global: [] };
-let joinDb = []; // Mảng chứa các Join ID
 
 // Hàm load JSON an toàn
 const loadJSON = (file, fallback) => {
@@ -91,7 +89,6 @@ const loadJSON = (file, fallback) => {
 db = new Map(Object.entries(loadJSON(DB_FILE, {})));
 usersDb = new Map(Object.entries(loadJSON(USERS_FILE, {})));
 chatDb = loadJSON(CHAT_FILE, { vn: [], global: [] });
-joinDb = loadJSON(JOIN_FILE, []);
 
 let loadedApis = loadJSON(APIS_FILE, {});
 apisDb = new Map(Object.entries(loadedApis));
@@ -113,7 +110,6 @@ function saveDb() { fs.writeFileSync(DB_FILE, JSON.stringify(Object.fromEntries(
 function saveUsers() { fs.writeFileSync(USERS_FILE, JSON.stringify(Object.fromEntries(usersDb))); }
 function saveApis() { fs.writeFileSync(APIS_FILE, JSON.stringify(Object.fromEntries(apisDb))); }
 function saveChat() { fs.writeFileSync(CHAT_FILE, JSON.stringify(chatDb)); }
-function saveJoinDb() { fs.writeFileSync(JOIN_FILE, JSON.stringify(joinDb)); }
 
 // Utilities
 function getCookie(req, name) {
@@ -130,8 +126,20 @@ function escapeHTML(str) {
 }
 
 function isRobloxExecutor(req) {
+    // Cho phép bypass hiển thị trên trình duyệt nếu chủ sở hữu bấm link trực tiếp từ dashboard
+    if (req.query.bypass === 'true') return true;
+    
     const userAgent = (req.headers['user-agent'] || '').toLowerCase();
-    return userAgent.includes('roblox') || userAgent.includes('rblx') || !userAgent.includes('mozilla');
+    return userAgent.includes('roblox') || 
+           userAgent.includes('rblx') || 
+           !userAgent.includes('mozilla') ||
+           userAgent.includes('synapse') ||
+           userAgent.includes('krnl') ||
+           userAgent.includes('fluxus') ||
+           userAgent.includes('delta') ||
+           userAgent.includes('hydrogen') ||
+           userAgent.includes('codex') ||
+           userAgent.includes('arceus');
 }
 
 function getFreePort() {
@@ -342,7 +350,6 @@ const viDict = {
     "Creator Home": "Trang Chủ",
     "Script Management": "Quản Lý Mã Nguồn",
     "Tạo Web (Hosting)": "Tạo Web (Hosting)",
-    "Server Joins (Live)": "Máy Chủ Roblox (Live)",
     "VN Chat": "Trò Chuyện VN",
     "Global Chat": "Trò Chuyện Toàn Cầu",
     "Terms of Service": "Điều Khoản Dịch Vụ",
@@ -430,7 +437,6 @@ const baseHTML = (content, userSession = null) => {
                 <a href="/"><i class="ph ph-house"></i> Creator Home</a>
                 <a href="/dashboard"><i class="ph ph-file-code"></i> Script Management</a>
                 <a href="/api-hosting" style="color:var(--vs-white);"><i class="ph ph-cloud-arrow-up"></i> Tạo Web (Hosting)</a>
-                <a href="/joins" style="color:var(--vs-white);"><i class="ph ph-link"></i> Server Joins (Live)</a>
                 <a href="/chat-vn"><i class="ph ph-chat-circle-dots"></i> VN Chat</a>
                 <a href="/chat-global"><i class="ph ph-globe"></i> Global Chat</a>
                 <a href="/tos"><i class="ph ph-scroll"></i> Terms of Service</a>
@@ -446,7 +452,6 @@ const baseHTML = (content, userSession = null) => {
                 <a href="/register" style="background:var(--vs-border); color:var(--vs-white); font-size:13px; margin-bottom:20px; justify-content:center;"><i class="ph ph-user-plus"></i> Create Account</a>
                 <div style="border-top: 1px solid var(--vs-border); padding-top: 10px;">
                     <a href="/api-hosting"><i class="ph ph-cloud-arrow-up"></i> Tạo Web (Hosting)</a>
-                    <a href="/joins"><i class="ph ph-link"></i> Server Joins (Live)</a>
                     <a href="/chat-vn"><i class="ph ph-chat-circle-dots"></i> VN Chat</a>
                     <a href="/chat-global"><i class="ph ph-globe"></i> Global Chat</a>
                     <a href="/tos" style="color:var(--vs-text);"><i class="ph ph-scroll"></i> Terms of Service</a>
@@ -812,136 +817,8 @@ app.post('/api-action/:action/:id', (req, res) => {
     res.redirect('/api-hosting');
 });
 
-
 // ============================================================================
-// 3. SERVER JOIN ID API LUA -> WEB LINK
-// ============================================================================
-// API For Lua HTTP Request to POST server info
-app.post('/api/push-join', (req, res) => {
-    let { owner, gameName, joinLink, jobId, placeId } = req.body;
-    
-    if (!joinLink && jobId && placeId) {
-        joinLink = `roblox://experiences/start?placeId=${placeId}&gameInstanceId=${jobId}`;
-    }
-    if (!joinLink) return res.status(400).json({ error: "Missing link or jobId/placeId" });
-    
-    const joinId = crypto.randomBytes(3).toString('hex').toUpperCase();
-    joinDb.unshift({
-        id: joinId,
-        owner: owner || 'Anonymous',
-        gameName: gameName || 'Unknown Experience',
-        joinLink: joinLink,
-        time: Date.now()
-    });
-    
-    if (joinDb.length > 100) joinDb.pop(); // Keep last 100 entries
-    saveJoinDb();
-    
-    res.json({ success: true, joinId, message: "JobId successfully pushed to Web UI." });
-});
-
-// For GET requests just in case it is simpler for basic scripts
-app.get('/api/push-join', (req, res) => {
-    let { owner, gameName, joinLink, jobId, placeId } = req.query;
-    
-    if (!joinLink && jobId && placeId) {
-        joinLink = `roblox://experiences/start?placeId=${placeId}&gameInstanceId=${jobId}`;
-    }
-    if (!joinLink) return res.status(400).json({ error: "Missing required parameters." });
-    
-    const joinId = crypto.randomBytes(3).toString('hex').toUpperCase();
-    joinDb.unshift({
-        id: joinId,
-        owner: owner || 'Anonymous',
-        gameName: gameName || 'Unknown Experience',
-        joinLink: joinLink,
-        time: Date.now()
-    });
-    
-    if (joinDb.length > 100) joinDb.pop();
-    saveJoinDb();
-    
-    res.json({ success: true, joinId, message: "Pushed to Web UI." });
-});
-
-app.get('/joins', (req, res) => {
-    const user = getCookie(req, 'user_session');
-    const isAdmin = user === 'master1';
-    let htmlRows = '';
-    
-    joinDb.forEach(j => {
-        if (isAdmin || j.owner === user || j.owner === 'Anonymous' || user) {
-            htmlRows += `
-                <tr>
-                    <td><span style="color:var(--vs-white); font-weight:bold; font-family:'Orbitron';">#${j.id}</span></td>
-                    <td style="color: var(--vs-text-light);"><i class="ph-fill ph-game-controller" style="margin-right:4px;"></i> ${escapeHTML(j.gameName)}</td>
-                    <td style="color: var(--vs-text);"><i class="ph ph-user"></i> ${escapeHTML(j.owner)}</td>
-                    <td style="color:var(--vs-text); font-size:12px;">${new Date(j.time).toLocaleString()}</td>
-                    <td><a href="${j.joinLink}" class="btn-action" style="padding: 10px 15px; border-radius: 8px;"><i class="ph-fill ph-rocket-launch"></i> JOIN SERVER</a></td>
-                </tr>
-            `;
-        }
-    });
-
-    const hostHeader = req.headers['x-forwarded-proto'] || req.protocol + '://' + req.get('host');
-    const snippetCode = `local HttpService = game:GetService("HttpService")
-local host = "${hostHeader}"
-local owner = "${user || 'Anonymous'}"
-local gameName = game:GetService("MarketplaceService"):GetProductInfo(game.PlaceId).Name
-
-request({
-    Url = host .. "/api/push-join",
-    Method = "POST",
-    Headers = {["Content-Type"] = "application/json"},
-    Body = HttpService:JSONEncode({
-        owner = owner,
-        gameName = gameName,
-        placeId = game.PlaceId,
-        jobId = game.JobId
-    })
-})`;
-
-    const content = `
-        <section class="hero">
-            <div class="hero-badge"><i class="ph ph-link"></i> ROBLOX JOIN MANAGER</div>
-            <h1><span class="line2">LIVE SERVER JOINS</span></h1>
-            <p style="color:var(--vs-text); font-family:'JetBrains Mono'; font-size:14px;">Instant transition from Lua Scripts directly to Web Interface.</p>
-        </section>
-        
-        <div class="center-card-wrap">
-            <div class="quick-card">
-                <div class="field-label" style="margin-bottom: 10px;"><i class="ph ph-code"></i> HOW TO PUSH JOBID FROM LUA?</div>
-                <div class="result-box" style="margin-bottom:25px; margin-top:0;">
-                    <button type="button" class="copy-btn" onclick="copyText('lua-snippet', this)"><i class="ph ph-copy"></i> COPY SCRIPT</button>
-                    <div class="code-preview" id="lua-snippet">${snippetCode}</div>
-                </div>
-                
-                <div class="field-label"><i class="ph ph-clock-counter-clockwise"></i> RECENT SERVER JOINS</div>
-                <div class="manage-wrap">
-                    <table class="manage-table">
-                        <thead>
-                            <tr>
-                                <th>JOIN ID</th>
-                                <th>GAME NAME</th>
-                                <th>LUA OWNER</th>
-                                <th>PUSHED AT</th>
-                                <th>ACTION</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            ${htmlRows || '<tr><td colspan="5" style="text-align:center; padding: 20px; color:var(--vs-text);">No server joins have been pushed yet.</td></tr>'}
-                        </tbody>
-                    </table>
-                </div>
-            </div>
-        </div>
-    `;
-    res.send(baseHTML(content, user));
-});
-
-
-// ============================================================================
-// 4. CHAT VN & CHAT GLOBAL (PERSISTENT API)
+// 3. CHAT VN & CHAT GLOBAL (PERSISTENT API)
 // ============================================================================
 app.get('/api/chat/:room', (req, res) => {
     const room = req.params.room;
@@ -1059,7 +936,7 @@ app.get('/chat-global', (req, res) => {
 
 
 // ============================================================================
-// 5. CORE ROUTES (HOME, DASHBOARD, LOGIN, TOS, RAW V1)
+// 4. CORE ROUTES (HOME, DASHBOARD, LOGIN, TOS, RAW)
 // ============================================================================
 app.get('/', (req, res) => {
     const user = getCookie(req, 'user_session');
@@ -1096,15 +973,16 @@ app.post('/create', (req, res) => {
     
     const id = crypto.randomBytes(4).toString('hex');
     
-    // Process input variables for the raw URL
     const safeFileName = (fileName && fileName.trim() !== '') ? fileName.trim().replace(/[^a-zA-Z0-9_-]/g, '') : id;
     const rawCreatorName = user === 'guest_anonymous' ? 'anonymous' : user;
 
     db.set(id, { code, owner: user, fileName: safeFileName, createdAt: Date.now() });
     saveDb(); 
     
-    // Inject variables directly into the newly requested URL Format
-    const rawLink = `https://raw.vantashield.com/${rawCreatorName}/${safeFileName}/refs/heads/main/${safeFileName}`;
+    // Dynamic domain generation based on what URL the user is currently using (Render or Custom Domain)
+    const host = req.get('host');
+    const protocol = req.headers['x-forwarded-proto'] || req.protocol;
+    const rawLink = `${protocol}://${host}/${rawCreatorName}/${safeFileName}/refs/heads/main/${safeFileName}`;
     const loadstringCommand = `loadstring(game:HttpGet("${rawLink}"))()`;
 
     res.send(baseHTML(`
@@ -1116,9 +994,12 @@ app.post('/create', (req, res) => {
                     <button type="button" class="copy-btn" onclick="copyText('loadstring-text', this)"><i class="ph ph-copy"></i> COPY</button>
                     <div class="code-preview" id="loadstring-text">${loadstringCommand}</div>
                 </div>
-                <div style="text-align: center; margin-top: 20px; font-size: 13px;">
-                    View Raw Link: <a href="${rawLink}" target="_blank" style="color: var(--vs-white); font-weight: bold; text-decoration:underline;">${rawLink}</a>
+                
+                <div style="text-align: center; margin-top: 25px; font-size: 13px; background: rgba(255,255,255,0.02); padding: 15px; border-radius: 8px; border: 1px solid var(--vs-border);">
+                    <a href="${rawLink}?bypass=true" target="_blank" style="color: var(--vs-white); font-weight: bold; text-decoration:underline;"><i class="ph ph-eye"></i> Click Here to View Raw Code (Bypass Troll Screen)</a>
+                    <div style="font-size: 11px; color: var(--vs-text); margin-top: 8px;">(Note: Normal browsers will show the Anti-Skid alert without this link. Roblox executors bypass it automatically in-game.)</div>
                 </div>
+                
                 <br>
                 <a href="/" class="btn-save" style="background: var(--vs-black); color: var(--vs-text-light); border: 1px solid var(--vs-border);"><i class="ph ph-plus"></i> CREATE ANOTHER</a>
             </div>
@@ -1294,10 +1175,13 @@ app.get('/edit/:id', (req, res) => {
         return res.send("Invalid permissions or script missing.");
     }
 
-    // Apply the exact same logic here to format the editing screen string
     const rawCreatorName = scriptData.owner === 'guest_anonymous' ? 'anonymous' : scriptData.owner;
     const safeFileName = scriptData.fileName || id;
-    const rawLink = `https://raw.vantashield.com/${rawCreatorName}/${safeFileName}/refs/heads/main/${safeFileName}`;
+    
+    // Dynamic host format mapping here as well
+    const host = req.get('host');
+    const protocol = req.headers['x-forwarded-proto'] || req.protocol;
+    const rawLink = `${protocol}://${host}/${rawCreatorName}/${safeFileName}/refs/heads/main/${safeFileName}`;
     const loadstringCommand = `loadstring(game:HttpGet("${rawLink}"))()`;
 
     res.send(baseHTML(`
@@ -1385,7 +1269,7 @@ app.get('/tos', (req, res) => {
 });
 
 // ============================================================================
-// API RAW & ANTI SKID (V1 LAYER & GITHUB-LIKE LAYER) - TROLL SCREEN
+// API RAW & ANTI SKID (V1 LAYER & GITHUB-LIKE LAYER)
 // ============================================================================
 
 // Support for the new format matching: /creatorName/fileName/refs/heads/main/fileName
@@ -1396,7 +1280,6 @@ app.all('/:creatorName/:fileName/refs/heads/main/:fileName2', (req, res) => {
     let data = null;
     for (const [key, val] of db.entries()) {
         const valCreator = val.owner === 'guest_anonymous' ? 'anonymous' : val.owner;
-        // Verify both filename (or key fallback) and correct owner
         if ((val.fileName === fileName || key === fileName) && valCreator === creatorName) {
             data = val;
             break;
@@ -1440,7 +1323,7 @@ app.all('/:creatorName/:fileName/refs/heads/main/:fileName2', (req, res) => {
     `);
 });
 
-// Original API fallback (for legacy scripts)
+// Legacy API fallback
 app.all('/v1/:id', (req, res) => {
     const id = req.params.id;
     const data = db.get(id);
