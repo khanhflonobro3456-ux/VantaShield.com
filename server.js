@@ -18,7 +18,7 @@ app.use('/app/:name', (req, res) => {
     
     if (!api) {
         return res.status(404).send(`
-            <div style="background:#09090b;color:#ef4444;font-family:monospace;padding:20px;text-align:center;">
+            <div style="background:#000;color:#fff;font-family:monospace;padding:20px;text-align:center;border:1px solid #333;">
                 <h2>404 - KHÔNG TÌM THẤY WEB</h2>
                 <p>Web [${name}] không tồn tại trên hệ thống.</p>
             </div>
@@ -27,7 +27,7 @@ app.use('/app/:name', (req, res) => {
     
     if (api.status !== 'ONLINE') {
         return res.status(503).send(`
-            <div style="background:#09090b;color:#eab308;font-family:monospace;padding:20px;text-align:center;">
+            <div style="background:#000;color:#aaa;font-family:monospace;padding:20px;text-align:center;border:1px solid #333;">
                 <h2>503 - WEB ĐANG TẮT (OFFLINE)</h2>
                 <p>Web [${name}] hiện đang không hoạt động. Vui lòng vào Dashboard bật lại.</p>
             </div>
@@ -65,31 +65,42 @@ app.use(express.json({ limit: '50mb' }));
 app.use(express.static(__dirname));
 
 // ============================================================================
-// DATA PERSISTENCE (LƯU TRỮ VÀO FILE)
+// DATA PERSISTENCE (LƯU TRỮ VÀO FILE) - HOÀN THIỆN
 // ============================================================================
 const DB_FILE = './vantashield_scripts.json';
 const USERS_FILE = './vantashield_users.json';
 const APIS_FILE = './vantashield_apis.json';
+const CHAT_FILE = './vantashield_chat.json';
+const JOIN_FILE = './vantashield_joins.json';
 
 let db = new Map();
 let usersDb = new Map();
+let chatDb = { vn: [], global: [] };
+let joinDb = []; // Mảng chứa các Join ID
 
-// Load existing data
-if (fs.existsSync(DB_FILE)) {
-    db = new Map(Object.entries(JSON.parse(fs.readFileSync(DB_FILE, 'utf8'))));
-}
-if (fs.existsSync(USERS_FILE)) {
-    usersDb = new Map(Object.entries(JSON.parse(fs.readFileSync(USERS_FILE, 'utf8'))));
-}
-if (fs.existsSync(APIS_FILE)) {
-    apisDb = new Map(Object.entries(JSON.parse(fs.readFileSync(APIS_FILE, 'utf8'))));
-    apisDb.forEach((api, key) => {
-        api.status = 'OFFLINE';
-        api.pid = null;
-        apisDb.set(key, api);
-    });
-    saveApis();
-}
+// Hàm load JSON an toàn
+const loadJSON = (file, fallback) => {
+    if (fs.existsSync(file)) {
+        try { return JSON.parse(fs.readFileSync(file, 'utf8')); } 
+        catch(e) { console.error("Error reading " + file, e); return fallback; }
+    }
+    return fallback;
+};
+
+// Khôi phục Dữ liệu
+db = new Map(Object.entries(loadJSON(DB_FILE, {})));
+usersDb = new Map(Object.entries(loadJSON(USERS_FILE, {})));
+chatDb = loadJSON(CHAT_FILE, { vn: [], global: [] });
+joinDb = loadJSON(JOIN_FILE, []);
+
+let loadedApis = loadJSON(APIS_FILE, {});
+apisDb = new Map(Object.entries(loadedApis));
+apisDb.forEach((api, key) => {
+    api.status = 'OFFLINE';
+    api.pid = null;
+    apisDb.set(key, api);
+});
+saveApis();
 
 // Master Admin Default
 if (!usersDb.has('master1')) {
@@ -97,9 +108,12 @@ if (!usersDb.has('master1')) {
     saveUsers();
 }
 
+// Lưu trữ
 function saveDb() { fs.writeFileSync(DB_FILE, JSON.stringify(Object.fromEntries(db))); }
 function saveUsers() { fs.writeFileSync(USERS_FILE, JSON.stringify(Object.fromEntries(usersDb))); }
 function saveApis() { fs.writeFileSync(APIS_FILE, JSON.stringify(Object.fromEntries(apisDb))); }
+function saveChat() { fs.writeFileSync(CHAT_FILE, JSON.stringify(chatDb)); }
+function saveJoinDb() { fs.writeFileSync(JOIN_FILE, JSON.stringify(joinDb)); }
 
 // Utilities
 function getCookie(req, name) {
@@ -138,132 +152,142 @@ const style = `
 @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&family=Orbitron:wght@400;700;900&display=swap');
 
 body.mobf-root {
-  --vs-bg: #09090b; --vs-card: #18181b; --vs-border: rgba(255, 255, 255, 0.1);
-  --vs-cyan: #06b6d4; --vs-purple: #a855f7; --vs-pink: #ec4899; --vs-gold: #eab308; --vs-red: #ef4444; --vs-green: #10b981;
-  background: var(--vs-bg); color: #e4e4e7;
+  --vs-bg: #030303; 
+  --vs-card: #0a0a0a; 
+  --vs-border: #1f1f1f;
+  --vs-border-hover: #333333;
+  --vs-text: #888888;
+  --vs-text-light: #e0e0e0;
+  --vs-white: #ffffff;
+  --vs-black: #000000;
+  
+  background: var(--vs-bg); color: var(--vs-text-light);
   font-family: "JetBrains Mono", ui-monospace, monospace;
   min-height: 100vh; margin: 0; overflow-x: hidden; position: relative;
 }
+
 .mobf-root::before {
   content: ""; position: fixed; inset: 0;
-  background-image: linear-gradient(rgba(255, 255, 255, 0.03) 1px, transparent 1px), linear-gradient(90deg, rgba(255, 255, 255, 0.03) 1px, transparent 1px);
+  background-image: linear-gradient(rgba(255, 255, 255, 0.02) 1px, transparent 1px), linear-gradient(90deg, rgba(255, 255, 255, 0.02) 1px, transparent 1px);
   background-size: 40px 40px; animation: gridMove 20s linear infinite; pointer-events: none; z-index: 0;
 }
 @keyframes gridMove { to { transform: translateY(40px); } }
 
-.orb { position: fixed; border-radius: 50%; filter: blur(90px); opacity: 0.15; pointer-events: none; z-index: 0; animation: orbFloat 10s ease-in-out infinite; }
-.orb1 { width: 500px; height: 500px; background: var(--vs-purple); top: -100px; left: -100px; }
-.orb2 { width: 450px; height: 450px; background: var(--vs-pink); bottom: -150px; right: -100px; animation-delay: -3s; }
-.orb3 { width: 300px; height: 300px; background: var(--vs-cyan); top: 40%; left: 30%; animation-delay: -6s; opacity: 0.1; }
+/* Monochrome ambient orbs */
+.orb { position: fixed; border-radius: 50%; filter: blur(100px); opacity: 0.03; pointer-events: none; z-index: 0; animation: orbFloat 10s ease-in-out infinite; }
+.orb1 { width: 500px; height: 500px; background: #ffffff; top: -100px; left: -100px; }
+.orb2 { width: 450px; height: 450px; background: #ffffff; bottom: -150px; right: -100px; animation-delay: -3s; }
+.orb3 { width: 300px; height: 300px; background: #ffffff; top: 40%; left: 30%; animation-delay: -6s; opacity: 0.01; }
 @keyframes orbFloat { 0%,100%{ transform:translate(0,0) scale(1);} 50%{ transform:translate(30px,-30px) scale(1.1);} }
 
 .mobf-nav {
   position: sticky; top: 0; z-index: 100; display: flex; align-items: center; justify-content: space-between;
-  padding: 16px 32px; background: rgba(9, 9, 11, 0.85); backdrop-filter: blur(16px); border-bottom: 1px solid var(--vs-border);
+  padding: 16px 32px; background: rgba(3, 3, 3, 0.85); backdrop-filter: blur(16px); border-bottom: 1px solid var(--vs-border);
 }
 .nav-logo {
   font-family: "Orbitron", sans-serif; font-size: 22px; font-weight: 900; letter-spacing: 2px;
-  background: linear-gradient(135deg, var(--vs-cyan), var(--vs-purple), var(--vs-pink));
-  -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent; text-decoration: none;
+  color: var(--vs-white); text-decoration: none; display: flex; align-items: center; gap: 8px;
 }
-.menu-toggle { font-size: 24px; background: none; border: none; color: var(--vs-cyan); cursor: pointer; transition: 0.3s; }
-.menu-toggle:hover { color: #fff; transform: scale(1.1); }
+.menu-toggle { font-size: 24px; background: none; border: none; color: var(--vs-white); cursor: pointer; transition: 0.3s; display: flex; align-items: center;}
+.menu-toggle:hover { color: var(--vs-text); transform: scale(1.1); }
 
 .sidebar {
-  position: fixed; top: 0; left: -300px; width: 280px; height: 100vh; background: #0f0f13;
+  position: fixed; top: 0; left: -300px; width: 280px; height: 100vh; background: #050505;
   border-right: 1px solid var(--vs-border); z-index: 999; padding: 30px 20px; box-sizing: border-box;
   transition: all 0.4s cubic-bezier(0.77, 0, 0.175, 1); box-shadow: 10px 0 30px rgba(0,0,0,0.9);
 }
 .sidebar.active { left: 0; }
-.sidebar-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 30px; font-family: "Orbitron"; font-weight: bold; color: var(--vs-cyan); }
-.sidebar-close { background: none; border: none; color: var(--vs-red); font-size: 20px; cursor: pointer; }
-.sidebar-menu a { display: block; padding: 14px 18px; color: #e4e4e7; text-decoration: none; border-radius: 8px; margin-bottom: 10px; transition: 0.3s; font-weight: bold;}
-.sidebar-menu a:hover { background: rgba(168, 85, 247, 0.15); color: var(--vs-cyan); padding-left: 25px; }
-.user-badge { background: rgba(255,255,255,0.03); padding: 12px; border-radius: 8px; font-size: 12px; margin-bottom: 20px; border: 1px solid rgba(255,255,255,0.05); text-align: center;}
+.sidebar-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 30px; font-family: "Orbitron"; font-weight: bold; color: var(--vs-text-light); }
+.sidebar-close { background: none; border: none; color: var(--vs-text); font-size: 20px; cursor: pointer; display: flex;}
+.sidebar-close:hover { color: var(--vs-white); }
+
+.sidebar-menu a { display: flex; align-items: center; gap: 12px; padding: 14px 18px; color: var(--vs-text); text-decoration: none; border-radius: 8px; margin-bottom: 5px; transition: 0.3s; font-weight: bold;}
+.sidebar-menu a i { font-size: 18px; }
+.sidebar-menu a:hover { background: rgba(255, 255, 255, 0.05); color: var(--vs-white); }
+.user-badge { background: rgba(255,255,255,0.02); padding: 12px; border-radius: 8px; font-size: 12px; margin-bottom: 20px; border: 1px solid var(--vs-border); text-align: center; color: var(--vs-text);}
 
 .hero { position: relative; z-index: 1; text-align: center; padding: 40px 20px 20px; max-width: 860px; margin: 0 auto; }
-.hero-badge { display: inline-flex; align-items: center; gap: 8px; padding: 6px 16px; border: 1px solid rgba(6, 182, 212, 0.35); border-radius: 20px; font-size: 11px; letter-spacing: 2px; text-transform: uppercase; color: var(--vs-cyan); margin-bottom: 20px; background: rgba(6, 182, 212, 0.08); }
-.hero h1 { font-family: "Orbitron", sans-serif; font-size: clamp(26px, 5vw, 42px); font-weight: 900; letter-spacing: 2px; margin: 0 0 10px 0; }
-.hero h1 .line2 { background: linear-gradient(135deg, var(--vs-cyan), var(--vs-purple)); -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent; }
+.hero-badge { display: inline-flex; align-items: center; gap: 8px; padding: 6px 16px; border: 1px solid var(--vs-border-hover); border-radius: 20px; font-size: 11px; letter-spacing: 2px; text-transform: uppercase; color: var(--vs-text-light); margin-bottom: 20px; background: rgba(255,255,255,0.02); }
+.hero h1 { font-family: "Orbitron", sans-serif; font-size: clamp(26px, 5vw, 42px); font-weight: 900; letter-spacing: 2px; margin: 0 0 10px 0; color: var(--vs-white);}
 
 .center-card-wrap { position: relative; z-index: 1; max-width: 800px; margin: 0 auto 80px; padding: 0 20px; }
-.quick-card { background: var(--vs-card); border: 1px solid var(--vs-border); border-radius: 20px; padding: 32px; position: relative; overflow: hidden; box-shadow: 0 10px 40px rgba(0,0,0,0.8); }
+.quick-card { background: var(--vs-card); border: 1px solid var(--vs-border); border-radius: 12px; padding: 32px; position: relative; overflow: hidden; box-shadow: 0 10px 40px rgba(0,0,0,0.8); }
 
 .header-flex { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; flex-wrap: wrap; gap: 10px;}
-.field-label { font-size: 13px; letter-spacing: 2px; text-transform: uppercase; color: var(--vs-purple); font-weight: bold; margin: 0 0 10px 0; display: block;}
+.field-label { font-size: 13px; letter-spacing: 2px; text-transform: uppercase; color: var(--vs-text-light); font-weight: bold; margin: 0 0 10px 0; display: block;}
 
-.quick-card input[type="text"], .quick-card input[type="password"] { width: 100%; padding: 14px; background: rgba(0,0,0,0.7); border: 1px solid rgba(168, 85, 247, 0.3); border-radius: 10px; color: var(--vs-cyan); font-family: "JetBrains Mono", monospace; font-size: 14px; box-sizing: border-box; outline: none; transition: all .3s; margin-bottom: 20px; }
-.quick-card input:focus, .quick-card textarea:focus { border-color: var(--vs-cyan); box-shadow: 0 0 15px rgba(6, 182, 212, 0.2); }
+.quick-card input[type="text"], .quick-card input[type="password"] { width: 100%; padding: 14px; background: var(--vs-black); border: 1px solid var(--vs-border); border-radius: 8px; color: var(--vs-white); font-family: "JetBrains Mono", monospace; font-size: 14px; box-sizing: border-box; outline: none; transition: all .3s; margin-bottom: 20px; }
+.quick-card input:focus, .quick-card textarea:focus { border-color: var(--vs-text); box-shadow: 0 0 15px rgba(255, 255, 255, 0.05); }
 
-.btn-upload { background: rgba(168, 85, 247, 0.1); color: var(--vs-cyan); border: 1px dashed var(--vs-purple); padding: 10px 15px; border-radius: 8px; font-size: 12px; cursor: pointer; transition: all 0.3s; font-family: "Orbitron"; display: inline-block; font-weight: bold; }
-.btn-upload:hover { background: rgba(168, 85, 247, 0.4); color: #fff; }
+.btn-upload { background: rgba(255,255,255,0.02); color: var(--vs-text); border: 1px dashed var(--vs-border-hover); padding: 10px 15px; border-radius: 8px; font-size: 12px; cursor: pointer; transition: all 0.3s; font-family: "Orbitron"; display: inline-flex; align-items: center; gap: 8px; font-weight: bold; }
+.btn-upload:hover { background: rgba(255,255,255,0.05); color: var(--vs-white); border-color: var(--vs-text); }
 input[type="file"] { display: none; }
 
-.quick-card textarea { width: 100%; height: 250px; background: rgba(0,0,0,0.7); border: 1px solid rgba(168, 85, 247, 0.3); border-radius: 10px; color: var(--vs-cyan); font-family: "JetBrains Mono", monospace; font-size: 13px; padding: 14px; box-sizing: border-box; outline: none; transition: all .3s; resize: none; margin-bottom: 15px; }
+.quick-card textarea { width: 100%; height: 250px; background: var(--vs-black); border: 1px solid var(--vs-border); border-radius: 8px; color: var(--vs-text-light); font-family: "JetBrains Mono", monospace; font-size: 13px; padding: 14px; box-sizing: border-box; outline: none; transition: all .3s; resize: none; margin-bottom: 15px; }
 
-.btn-save { width: 100%; padding: 16px; border: none; border-radius: 12px; font-family: "Orbitron"; font-size: 15px; font-weight: 700; letter-spacing: 2px; cursor: pointer; color: #fff; background: linear-gradient(135deg, var(--vs-cyan), var(--vs-purple), var(--vs-pink)); background-size: 200% 200%; animation: gradShift 4s ease infinite; transition: all .2s; text-decoration:none; display:block; text-align:center; box-sizing:border-box;}
-.btn-save:hover { transform: translateY(-2px); box-shadow: 0 8px 30px rgba(168, 85, 247, 0.4); }
-@keyframes gradShift { 0%{background-position:0% 50%} 50%{background-position:100% 50%} 100%{background-position:0% 50%} }
+.btn-save { width: 100%; padding: 16px; border: none; border-radius: 8px; font-family: "Orbitron"; font-size: 15px; font-weight: 900; letter-spacing: 2px; cursor: pointer; color: var(--vs-black); background: var(--vs-white); transition: all .2s; text-decoration:none; display:flex; align-items:center; justify-content:center; gap: 10px; box-sizing:border-box;}
+.btn-save:hover { background: var(--vs-text-light); transform: translateY(-2px); box-shadow: 0 8px 25px rgba(255, 255, 255, 0.15); }
 
-.result-box { margin-top: 15px; padding: 20px; border-radius: 12px; background: rgba(0,0,0,0.5); border: 1px solid rgba(6, 182, 212, 0.4); text-align: left; position: relative;}
-.copy-btn { position: absolute; top: 10px; right: 10px; background: var(--vs-purple); color: white; border: none; padding: 8px 16px; border-radius: 6px; font-size: 12px; font-weight: bold; cursor: pointer; font-family: "Orbitron"; transition: 0.3s; }
-.copy-btn:hover { background: var(--vs-pink); }
-.code-preview { color: var(--vs-cyan); word-break: break-all; font-size: 13px; line-height: 1.5; margin-top: 10px; }
+.result-box { margin-top: 15px; padding: 20px; border-radius: 8px; background: var(--vs-black); border: 1px solid var(--vs-border); text-align: left; position: relative;}
+.copy-btn { position: absolute; top: 10px; right: 10px; background: var(--vs-border); color: var(--vs-text-light); border: 1px solid var(--vs-border-hover); padding: 8px 16px; border-radius: 6px; font-size: 12px; font-weight: bold; cursor: pointer; font-family: "Orbitron"; transition: 0.3s; }
+.copy-btn:hover { background: var(--vs-white); color: var(--vs-black); }
+.code-preview { color: var(--vs-text-light); word-break: break-all; font-size: 13px; line-height: 1.5; margin-top: 10px; white-space: pre-wrap; }
 
 /* MANAGEMENT TABLE */
 .manage-wrap { overflow-x: auto; width: 100%; }
 .manage-table { width: 100%; min-width: 600px; border-collapse: collapse; margin-top: 15px; font-size: 13px; }
-.manage-table th { background: rgba(255,255,255,0.03); color: var(--vs-purple); padding: 12px; text-align: left; border-bottom: 1px solid var(--vs-border); font-family: "Orbitron"; }
+.manage-table th { background: rgba(255,255,255,0.02); color: var(--vs-text-light); padding: 12px; text-align: left; border-bottom: 1px solid var(--vs-border); font-family: "Orbitron"; }
 .manage-table td { padding: 14px 12px; border-bottom: 1px solid rgba(255,255,255,0.02); vertical-align: middle; }
-.btn-action { padding: 6px 10px; border: none; border-radius: 6px; font-family: "JetBrains Mono"; cursor: pointer; font-weight: bold; font-size: 11px; text-decoration: none; margin-right: 5px; display: inline-block; margin-bottom: 5px;}
-.btn-edit { background: var(--vs-gold); color: #000; }
-.btn-delete { background: var(--vs-red); color: #fff; }
-.btn-download { background: var(--vs-green); color: #fff; }
-.btn-open { background: var(--vs-cyan); color: #000; }
-.btn-start { background: var(--vs-purple); color: #fff; }
-.badge-admin { background: var(--vs-gold); color: #000; padding: 2px 6px; border-radius: 4px; font-size: 10px; font-weight: bold; }
+.btn-action { padding: 6px 10px; border: 1px solid var(--vs-border); border-radius: 6px; font-family: "JetBrains Mono"; cursor: pointer; font-weight: bold; font-size: 11px; text-decoration: none; margin-right: 5px; display: inline-flex; align-items:center; gap:6px; margin-bottom: 5px; background: var(--vs-black); color: var(--vs-text-light); transition: 0.2s;}
+.btn-action:hover { border-color: var(--vs-text); color: var(--vs-white); }
+.btn-delete:hover { border-color: #ef4444; color: #ef4444; }
+.badge-admin { background: var(--vs-white); color: var(--vs-black); padding: 2px 6px; border-radius: 4px; font-size: 10px; font-weight: bold; }
 
 /* CHAT SYSTEM UI */
-.chat-box { background: rgba(0,0,0,0.5); border: 1px solid var(--vs-border); border-radius: 12px; height: 400px; display: flex; flex-direction: column; overflow: hidden; }
-.chat-messages { flex: 1; padding: 20px; overflow-y: auto; display: flex; flex-direction: column; gap: 15px; }
-.chat-msg { max-width: 80%; padding: 12px 16px; border-radius: 12px; font-size: 14px; line-height: 1.4; }
-.msg-bot { background: rgba(168, 85, 247, 0.1); border: 1px solid rgba(168, 85, 247, 0.3); align-self: flex-start; border-bottom-left-radius: 2px; }
-.msg-user { background: rgba(6, 182, 212, 0.1); border: 1px solid rgba(6, 182, 212, 0.3); align-self: flex-end; border-bottom-right-radius: 2px; color: var(--vs-cyan); }
+.chat-box { background: var(--vs-black); border: 1px solid var(--vs-border); border-radius: 8px; height: 400px; display: flex; flex-direction: column; overflow: hidden; }
+.chat-messages { flex: 1; padding: 20px; overflow-y: auto; display: flex; flex-direction: column; gap: 15px; scroll-behavior: smooth;}
+.chat-msg { max-width: 80%; padding: 12px 16px; border-radius: 8px; font-size: 14px; line-height: 1.4; word-break: break-word; }
+.msg-bot { background: var(--vs-card); border: 1px solid var(--vs-border); align-self: flex-start; border-bottom-left-radius: 2px; color: var(--vs-text); }
+.msg-user { background: var(--vs-border); border: 1px solid var(--vs-border-hover); align-self: flex-end; border-bottom-right-radius: 2px; color: var(--vs-white); }
 .chat-input-area { display: flex; gap: 10px; padding: 15px; background: rgba(255,255,255,0.02); border-top: 1px solid var(--vs-border); align-items: center; }
-.btn-attach { background: rgba(255,255,255,0.05); border: 1px solid var(--vs-border); color: var(--vs-cyan); width: 45px; height: 45px; border-radius: 10px; font-size: 24px; cursor: pointer; display: flex; justify-content: center; align-items: center; transition: 0.3s; }
-.btn-attach:hover { background: var(--vs-cyan); color: #000; }
-.chat-input { flex: 1; background: rgba(0,0,0,0.7); border: 1px solid rgba(168, 85, 247, 0.3); border-radius: 10px; color: #fff; padding: 0 15px; height: 45px; font-family: "JetBrains Mono"; outline: none; }
-.btn-send { background: var(--vs-purple); border: none; color: white; padding: 0 20px; height: 45px; border-radius: 10px; font-family: "Orbitron"; font-weight: bold; cursor: pointer; transition: 0.3s; }
-.btn-send:hover { background: var(--vs-pink); }
+.btn-attach { background: var(--vs-black); border: 1px solid var(--vs-border); color: var(--vs-text-light); width: 45px; height: 45px; border-radius: 8px; font-size: 20px; cursor: pointer; display: flex; justify-content: center; align-items: center; transition: 0.3s; }
+.btn-attach:hover { background: var(--vs-white); color: var(--vs-black); }
+.chat-input { flex: 1; background: var(--vs-black); border: 1px solid var(--vs-border); border-radius: 8px; color: var(--vs-white); padding: 0 15px; height: 45px; font-family: "JetBrains Mono"; outline: none; transition: 0.3s;}
+.chat-input:focus { border-color: var(--vs-text); }
+.btn-send { background: var(--vs-white); border: none; color: var(--vs-black); padding: 0 20px; height: 45px; border-radius: 8px; font-family: "Orbitron"; font-weight: bold; cursor: pointer; transition: 0.3s; display:flex; align-items:center; gap:8px;}
+.btn-send:hover { background: var(--vs-text-light); }
 
 /* TERMINAL LOADER */
 #loader-overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.9); z-index: 99999; flex-direction: column; justify-content: center; align-items: center; }
-.terminal-window { width: 90%; max-width: 600px; background: #000; border: 1px solid var(--vs-cyan); border-radius: 10px; overflow: hidden; box-shadow: 0 0 30px rgba(6, 182, 212, 0.3); }
-.terminal-header { background: #111; padding: 10px; display: flex; gap: 8px; border-bottom: 1px solid #333; }
+.terminal-window { width: 90%; max-width: 600px; background: #000; border: 1px solid var(--vs-border-hover); border-radius: 8px; overflow: hidden; box-shadow: 0 0 30px rgba(255,255,255,0.05); }
+.terminal-header { background: #111; padding: 10px; display: flex; gap: 8px; border-bottom: 1px solid #222; }
 .terminal-dot { width: 12px; height: 12px; border-radius: 50%; }
-.terminal-body { padding: 20px; font-family: 'JetBrains Mono', monospace; font-size: 14px; color: var(--vs-green); min-height: 250px; display: flex; flex-direction: column; gap: 10px; }
+.terminal-body { padding: 20px; font-family: 'JetBrains Mono', monospace; font-size: 14px; color: var(--vs-text-light); min-height: 250px; display: flex; flex-direction: column; gap: 10px; }
 .term-line { opacity: 0; animation: fadeIn 0.3s forwards; }
 .blink { animation: blinker 1s linear infinite; }
 @keyframes fadeIn { to { opacity: 1; } }
 @keyframes blinker { 50% { opacity: 0; } }
 
 /* TROLL SCREEN & ALERTS */
-.cyber-text-alert { font-family: 'Orbitron', sans-serif; font-size: 13px; font-weight: bold; color: var(--vs-cyan); text-shadow: 0 0 8px rgba(6, 182, 212, 0.6); letter-spacing: 1px; animation: pulseGlow 2s infinite; }
-@keyframes pulseGlow { 0%, 100% { opacity: 1; text-shadow: 0 0 8px rgba(6, 182, 212, 0.6); } 50% { opacity: 0.8; text-shadow: 0 0 15px rgba(6, 182, 212, 1); } }
+.cyber-text-alert { font-family: 'Orbitron', sans-serif; font-size: 13px; font-weight: bold; color: var(--vs-white); text-shadow: 0 0 8px rgba(255,255,255,0.3); letter-spacing: 1px; animation: pulseGlow 2s infinite; display:flex; align-items:center; gap:8px;}
+@keyframes pulseGlow { 0%, 100% { opacity: 1; text-shadow: 0 0 8px rgba(255,255,255,0.3); } 50% { opacity: 0.7; text-shadow: 0 0 15px rgba(255,255,255,0.6); } }
 .troll-screen { position: fixed; inset: 0; z-index: 999999; background: #000; display: flex; flex-direction: column; justify-content: center; align-items: center; text-align: center; }
-.troll-text { font-family: 'Orbitron', sans-serif; font-size: clamp(38px, 8vw, 90px); font-weight: 900; color: var(--vs-red); text-shadow: 2px 2px 0px #fff; animation: shake 0.1s infinite; margin-bottom: 15px; }
-.troll-sub { font-size: 20px; background: var(--vs-card); color: var(--vs-gold); padding: 12px 25px; font-weight: bold; border-radius: 8px; border: 1px solid var(--vs-red); }
+.troll-text { font-family: 'Orbitron', sans-serif; font-size: clamp(38px, 8vw, 90px); font-weight: 900; color: #fff; text-shadow: 2px 2px 0px #333; animation: shake 0.1s infinite; margin-bottom: 15px; }
+.troll-sub { font-size: 20px; background: var(--vs-card); color: #ccc; padding: 12px 25px; font-weight: bold; border-radius: 8px; border: 1px solid #333; }
 @keyframes shake { 0% { transform: translate(2px, 2px); } 50% { transform: translate(-2px, -2px); } 100% { transform: translate(2px, -2px); } }
-.alert { padding: 15px; background: rgba(239, 68, 68, 0.1); border: 1px solid var(--vs-red); color: #fca5a5; border-radius: 8px; margin-bottom: 20px; text-align: center; font-weight: bold; }
-.alert-success { background: rgba(16, 185, 129, 0.1); border: 1px solid var(--vs-green); color: #6ee7b7; }
+.alert { padding: 15px; background: rgba(255,255,255,0.05); border: 1px solid var(--vs-border); color: var(--vs-text-light); border-radius: 8px; margin-bottom: 20px; text-align: center; font-weight: bold; }
+.alert-success { background: rgba(255,255,255,0.1); border: 1px solid var(--vs-text); color: var(--vs-white); }
 
 /* TOS */
 .tos-list { text-align: left; margin-top: 20px; }
-.tos-item { margin-bottom: 25px; padding-bottom: 15px; border-bottom: 1px solid rgba(255,255,255,0.05); }
-.tos-title { font-family: 'Orbitron'; font-size: 16px; color: var(--vs-cyan); margin-bottom: 8px; font-weight: bold; }
-.tos-title span { color: var(--vs-purple); margin-right: 8px; }
-.tos-desc { font-size: 14px; color: #a1a1aa; line-height: 1.6; }
+.tos-item { margin-bottom: 25px; padding-bottom: 15px; border-bottom: 1px solid var(--vs-border); }
+.tos-title { font-family: 'Orbitron'; font-size: 16px; color: var(--vs-white); margin-bottom: 8px; font-weight: bold; }
+.tos-title span { color: var(--vs-text); margin-right: 8px; }
+.tos-desc { font-size: 14px; color: var(--vs-text); line-height: 1.6; }
 </style>
+
+<!-- ID Icon Library (Phosphor Icons) -->
+<script src="https://unpkg.com/@phosphor-icons/web"></script>
 
 <script>
 function toggleSidebar() { document.getElementById('sidebarNav').classList.toggle('active'); }
@@ -280,8 +304,9 @@ function copyText(elementId, btnElement) {
     textArea.value = textToCopy; document.body.appendChild(textArea); textArea.select();
     try {
         document.execCommand('copy');
-        btnElement.innerText = 'COPIED!'; btnElement.style.background = 'var(--vs-cyan)'; btnElement.style.color = '#000';
-        setTimeout(() => { btnElement.innerText = 'COPY'; btnElement.style.background = 'var(--vs-purple)'; btnElement.style.color = '#fff'; }, 2000);
+        btnElement.innerHTML = '<i class="ph ph-check"></i> COPIED!'; 
+        btnElement.style.background = 'var(--vs-white)'; btnElement.style.color = 'var(--vs-black)';
+        setTimeout(() => { btnElement.innerHTML = '<i class="ph ph-copy"></i> COPY'; btnElement.style.background = 'var(--vs-border)'; btnElement.style.color = 'var(--vs-text-light)'; }, 2000);
     } catch (err) { console.error(err); }
     document.body.removeChild(textArea);
 }
@@ -292,9 +317,9 @@ function copyApiLink(projectName, btnElement) {
     textArea.value = url; document.body.appendChild(textArea); textArea.select();
     try {
         document.execCommand('copy');
-        btnElement.innerText = 'COPIED!'; 
-        btnElement.style.background = 'var(--vs-purple)'; btnElement.style.color = '#fff';
-        setTimeout(() => { btnElement.innerText = 'COPY LINK'; btnElement.style.background = 'var(--vs-gold)'; btnElement.style.color = '#000'; }, 2000);
+        btnElement.innerHTML = '<i class="ph ph-check"></i> COPIED!'; 
+        btnElement.style.borderColor = 'var(--vs-white)'; btnElement.style.color = 'var(--vs-white)';
+        setTimeout(() => { btnElement.innerHTML = '<i class="ph ph-copy"></i> COPY LINK'; btnElement.style.borderColor = 'var(--vs-border)'; btnElement.style.color = 'var(--vs-text-light)'; }, 2000);
     } catch(e) {}
     document.body.removeChild(textArea);
 }
@@ -317,6 +342,7 @@ const viDict = {
     "Creator Home": "Trang Chủ",
     "Script Management": "Quản Lý Mã Nguồn",
     "Tạo Web (Hosting)": "Tạo Web (Hosting)",
+    "Server Joins (Live)": "Máy Chủ Roblox (Live)",
     "VN Chat": "Trò Chuyện VN",
     "Global Chat": "Trò Chuyện Toàn Cầu",
     "Terms of Service": "Điều Khoản Dịch Vụ",
@@ -382,42 +408,48 @@ const baseHTML = (content, userSession = null) => {
     <div class="orb orb1"></div><div class="orb orb2"></div><div class="orb orb3"></div>
     
     <nav class="mobf-nav">
-        <a href="/" class="nav-logo">VANTASHIELD.COM</a>
-        <button class="menu-toggle" onclick="toggleSidebar()">☰</button>
+        <a href="/" class="nav-logo"><i class="ph-fill ph-shield-check"></i> VANTASHIELD.COM</a>
+        <button class="menu-toggle" onclick="toggleSidebar()"><i class="ph ph-list"></i></button>
     </nav>
 
     <div class="sidebar" id="sidebarNav">
         <div class="sidebar-header">
             <span>NAVIGATION</span>
-            <button class="sidebar-close" onclick="toggleSidebar()">✕</button>
+            <button class="sidebar-close" onclick="toggleSidebar()"><i class="ph ph-x"></i></button>
         </div>
         ${userSession ? `
             <div class="user-badge">
-                🟢 Logged in as:<br> 
-                <b style="color:${isAdmin ? 'var(--vs-gold)' : 'var(--vs-cyan)'}; font-size: 16px;">
-                    ${escapeHTML(userSession).toUpperCase()} ${isAdmin ? '👑' : ''}
+                <div style="display:flex; justify-content:center; align-items:center; gap:6px; margin-bottom:8px;">
+                    <i class="ph-fill ph-check-circle" style="color: var(--vs-white);"></i> Logged in as:
+                </div>
+                <b style="color:var(--vs-white); font-size: 16px; display:flex; justify-content:center; align-items:center; gap:6px;">
+                    ${escapeHTML(userSession).toUpperCase()} ${isAdmin ? '<i class="ph-fill ph-crown"></i>' : ''}
                 </b>
             </div>
             <div class="sidebar-menu">
-                <a href="/">🏠 Creator Home</a>
-                <a href="/dashboard">📊 Script Management</a>
-                <a href="/api-hosting" style="color:var(--vs-cyan);">🚀 Tạo Web (Hosting)</a>
-                <a href="/chat-vn">🇻🇳 VN Chat</a>
-                <a href="/chat-global">🌍 Global Chat</a>
-                <a href="/tos">📜 Terms of Service</a>
-                <a href="/logout" style="color: var(--vs-red); margin-top: 40px;">🚪 Logout</a>
+                <a href="/"><i class="ph ph-house"></i> Creator Home</a>
+                <a href="/dashboard"><i class="ph ph-file-code"></i> Script Management</a>
+                <a href="/api-hosting" style="color:var(--vs-white);"><i class="ph ph-cloud-arrow-up"></i> Tạo Web (Hosting)</a>
+                <a href="/joins" style="color:var(--vs-white);"><i class="ph ph-link"></i> Server Joins (Live)</a>
+                <a href="/chat-vn"><i class="ph ph-chat-circle-dots"></i> VN Chat</a>
+                <a href="/chat-global"><i class="ph ph-globe"></i> Global Chat</a>
+                <a href="/tos"><i class="ph ph-scroll"></i> Terms of Service</a>
+                <a href="/logout" style="color: var(--vs-text); margin-top: 40px;"><i class="ph ph-sign-out"></i> Logout</a>
             </div>
         ` : `
-            <div class="user-badge">🔴 Not Logged In</div>
+            <div class="user-badge">
+                <i class="ph-fill ph-x-circle" style="margin-right:6px;"></i> Not Logged In
+            </div>
             <div class="sidebar-menu" style="text-align:center;">
-                <p style="font-size:12px; color:#a1a1aa; margin-bottom:15px;">Log in to securely save, edit, and manage your scripts globally.</p>
-                <a href="/login" style="background:var(--vs-purple); color:#fff; font-size:13px; margin-bottom:10px;">🔑 Login</a>
-                <a href="/register" style="background:var(--vs-cyan); color:#000; font-size:13px; margin-bottom:20px;">📝 Create Account</a>
+                <p style="font-size:12px; color:var(--vs-text); margin-bottom:15px;">Log in to securely save, edit, and manage your scripts globally.</p>
+                <a href="/login" style="background:var(--vs-white); color:var(--vs-black); font-size:13px; margin-bottom:10px; justify-content:center;"><i class="ph ph-key"></i> Login</a>
+                <a href="/register" style="background:var(--vs-border); color:var(--vs-white); font-size:13px; margin-bottom:20px; justify-content:center;"><i class="ph ph-user-plus"></i> Create Account</a>
                 <div style="border-top: 1px solid var(--vs-border); padding-top: 10px;">
-                    <a href="/api-hosting" style="color:var(--vs-cyan); font-size: 13px; display:block; margin-bottom:10px;">🚀 Tạo Web (Hosting)</a>
-                    <a href="/chat-vn" style="color:#fff; font-size: 13px; display:block; margin-bottom:10px;">🇻🇳 VN Chat</a>
-                    <a href="/chat-global" style="color:#fff; font-size: 13px; display:block; margin-bottom:10px;">🌍 Global Chat</a>
-                    <a href="/tos" style="color:#a1a1aa; font-size: 13px;">📜 Terms of Service</a>
+                    <a href="/api-hosting"><i class="ph ph-cloud-arrow-up"></i> Tạo Web (Hosting)</a>
+                    <a href="/joins"><i class="ph ph-link"></i> Server Joins (Live)</a>
+                    <a href="/chat-vn"><i class="ph ph-chat-circle-dots"></i> VN Chat</a>
+                    <a href="/chat-global"><i class="ph ph-globe"></i> Global Chat</a>
+                    <a href="/tos" style="color:var(--vs-text);"><i class="ph ph-scroll"></i> Terms of Service</a>
                 </div>
             </div>
         `}
@@ -429,10 +461,10 @@ const baseHTML = (content, userSession = null) => {
     <div id="loader-overlay">
         <div class="terminal-window">
             <div class="terminal-header">
-                <div class="terminal-dot" style="background:#ef4444;"></div>
-                <div class="terminal-dot" style="background:#eab308;"></div>
-                <div class="terminal-dot" style="background:#10b981;"></div>
-                <div style="color:#666; font-size:12px; margin-left:10px; line-height:12px;">VantaShield Server Deploy</div>
+                <div class="terminal-dot" style="background:#333;"></div>
+                <div class="terminal-dot" style="background:#555;"></div>
+                <div class="terminal-dot" style="background:#777;"></div>
+                <div style="color:var(--vs-text); font-size:12px; margin-left:10px; line-height:12px; font-family:'JetBrains Mono';">System Deploy</div>
             </div>
             <div class="terminal-body" id="term-body"></div>
         </div>
@@ -453,22 +485,23 @@ app.get('/api-hosting', (req, res) => {
     
     apisDb.forEach((val, key) => {
         if (isAdmin || val.owner === user) {
-            const statusColor = val.status === 'ONLINE' ? 'var(--vs-green)' : 'var(--vs-red)';
+            const statusColor = val.status === 'ONLINE' ? 'var(--vs-white)' : 'var(--vs-text)';
+            const statusIcon = val.status === 'ONLINE' ? '<i class="ph-fill ph-check-circle"></i>' : '<i class="ph-fill ph-x-circle"></i>';
             rowsHtml += `
                 <tr>
-                    <td style="color:var(--vs-cyan); font-weight:bold;">${escapeHTML(val.name)}</td>
+                    <td style="color:var(--vs-white); font-weight:bold;">${escapeHTML(val.name)}</td>
                     ${isAdmin ? `<td><span class="badge-admin">${val.owner.toUpperCase()}</span></td>` : ''}
-                    <td><span style="color: ${statusColor}; font-weight: bold;">${val.status === 'ONLINE' ? '🟢 ONLINE' : '🔴 OFFLINE'}</span></td>
-                    <td>/app/${val.name}</td>
+                    <td><span style="color: ${statusColor}; font-weight: bold; display:flex; align-items:center; gap:6px;">${statusIcon} ${val.status === 'ONLINE' ? 'ONLINE' : 'OFFLINE'}</span></td>
+                    <td style="color:var(--vs-text); font-family:'JetBrains Mono';">/app/${val.name}</td>
                     <td>
                         ${val.status === 'ONLINE' ? `
-                            <button class="btn-action btn-open" onclick="openApiLink('${val.name}')">MỞ WEB</button>
-                            <button class="btn-action btn-edit" onclick="copyApiLink('${val.name}', this)">COPY LINK</button>
-                            <form action="/api-action/stop/${key}" method="POST" style="display:inline;"><button type="submit" class="btn-action btn-delete">STOP</button></form>
+                            <button class="btn-action" onclick="openApiLink('${val.name}')"><i class="ph ph-arrow-square-out"></i> MỞ WEB</button>
+                            <button class="btn-action" onclick="copyApiLink('${val.name}', this)"><i class="ph ph-copy"></i> COPY LINK</button>
+                            <form action="/api-action/stop/${key}" method="POST" style="display:inline;"><button type="submit" class="btn-action"><i class="ph ph-stop-circle"></i> STOP</button></form>
                         ` : `
-                            <form action="/api-action/start/${key}" method="POST" style="display:inline;"><button type="submit" class="btn-action btn-start">START</button></form>
+                            <form action="/api-action/start/${key}" method="POST" style="display:inline;"><button type="submit" class="btn-action" style="color:var(--vs-white); border-color:var(--vs-text);"><i class="ph ph-play-circle"></i> START</button></form>
                         `}
-                        <form action="/api-action/delete/${key}" method="POST" style="display:inline;" onsubmit="return confirm('Bạn có chắc muốn xóa Web này vĩnh viễn?');"><button type="submit" class="btn-action btn-delete" style="background:#52525b;">XÓA</button></form>
+                        <form action="/api-action/delete/${key}" method="POST" style="display:inline;" onsubmit="return confirm('Bạn có chắc muốn xóa Web này vĩnh viễn?');"><button type="submit" class="btn-action btn-delete"><i class="ph ph-trash"></i> XÓA</button></form>
                     </td>
                 </tr>
             `;
@@ -479,19 +512,19 @@ app.get('/api-hosting', (req, res) => {
 
     res.send(baseHTML(`
         <section class="hero">
-            <div class="hero-badge" style="border-color: var(--vs-gold); color: var(--vs-gold); background: rgba(234, 179, 8, 0.1);">VANTASHIELD CLOUD PLATFORM</div>
+            <div class="hero-badge"><i class="ph ph-cloud"></i> VANTASHIELD CLOUD PLATFORM</div>
             <h1><span class="line2">TẠO WEB (HOSTING)</span></h1>
-            <p style="color:#a1a1aa; font-family:'JetBrains Mono'; font-size:14px;">Khởi tạo API/Web từ kho Github hoặc tạo thủ công với Proxy bảo mật.</p>
+            <p style="color:var(--vs-text); font-family:'JetBrains Mono'; font-size:14px;">Khởi tạo API/Web từ kho Github hoặc tạo thủ công với Proxy bảo mật.</p>
         </section>
 
-        ${msg ? `<div class="center-card-wrap"><div class="alert alert-success">${escapeHTML(msg)}</div></div>` : ''}
+        ${msg ? `<div class="center-card-wrap"><div class="alert alert-success"><i class="ph-fill ph-check-circle" style="margin-right:8px;"></i> ${escapeHTML(msg)}</div></div>` : ''}
 
         <div class="center-card-wrap" style="max-width: 1000px; display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 20px;">
             
             <!-- OPTION 1: DEPLOY FROM GITHUB -->
             <div class="quick-card" style="padding: 25px;">
-                <div class="field-label" style="color: var(--vs-cyan); font-size: 15px; margin-bottom: 20px; text-align:center;">
-                    <span style="font-size: 20px;">🔗</span> DEPLOY TỪ GITHUB
+                <div class="field-label" style="color: var(--vs-white); font-size: 15px; margin-bottom: 20px; text-align:center;">
+                    <i class="ph ph-github-logo" style="font-size: 28px; margin-bottom: 8px; display: block;"></i> DEPLOY TỪ GITHUB
                 </div>
                 <form id="githubForm" onsubmit="handleAjaxDeploy(event, 'github')">
                     <label class="field-label">TÊN DỰ ÁN WEB</label>
@@ -500,22 +533,22 @@ app.get('/api-hosting', (req, res) => {
                     <label class="field-label">LINK KHO GITHUB (Public)</label>
                     <input type="text" name="repo_url" placeholder="https://github.com/user/repo.git" required>
                     
-                    <p style="font-size: 11px; color: #a1a1aa; margin-top: -5px; margin-bottom: 15px;">Hệ thống sẽ tự động git clone, chạy npm install và start server.js.</p>
+                    <p style="font-size: 11px; color: var(--vs-text); margin-top: -5px; margin-bottom: 15px;">Hệ thống sẽ tự động git clone, chạy npm install và start server.js.</p>
                     
-                    <button type="submit" class="btn-save" style="background: linear-gradient(135deg, #2ea043, #238636); margin-top: 10px;">DEPLOY TỪ GITHUB</button>
+                    <button type="submit" class="btn-save" style="margin-top: 10px;"><i class="ph ph-rocket-launch"></i> DEPLOY TỪ GITHUB</button>
                 </form>
             </div>
 
             <!-- OPTION 2: CREATE DIRECTLY -->
             <div class="quick-card" style="padding: 25px;">
-                <div class="field-label" style="color: var(--vs-purple); font-size: 15px; margin-bottom: 20px; text-align:center;">
-                    <span style="font-size: 20px;">⚡</span> TẠO TRỰC TIẾP TẠI WEB
+                <div class="field-label" style="color: var(--vs-white); font-size: 15px; margin-bottom: 20px; text-align:center;">
+                    <i class="ph ph-terminal-window" style="font-size: 28px; margin-bottom: 8px; display: block;"></i> TẠO TRỰC TIẾP TẠI WEB
                 </div>
                 <form id="manualForm" onsubmit="handleAjaxDeploy(event, 'manual')">
                     <label class="field-label">TÊN DỰ ÁN WEB</label>
                     <input type="text" name="project_name" placeholder="vidu: my-local-web" required pattern="[a-z0-9-]+" title="Chữ thường, số và gạch ngang">
                     
-                    <label class="field-label" style="color: var(--vs-cyan);">package.json</label>
+                    <label class="field-label"><i class="ph ph-file-code"></i> package.json</label>
                     <textarea name="pkg_json" style="height: 100px; font-family: 'JetBrains Mono'; margin-bottom: 15px;">{
   "name": "my-web",
   "version": "1.0.0",
@@ -525,21 +558,21 @@ app.get('/api-hosting', (req, res) => {
   }
 }</textarea>
                     
-                    <label class="field-label" style="color: var(--vs-gold);">server.js</label>
+                    <label class="field-label"><i class="ph ph-file-js"></i> server.js</label>
                     <textarea name="srv_js" style="height: 150px; font-family: 'JetBrains Mono'; margin-bottom: 15px;">const express = require('express');
 const app = express();
 app.get('/', (req, res) => res.send('<h1>Web tạo thành công!</h1>'));
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log('Running'));</textarea>
                     
-                    <button type="submit" class="btn-save">TIẾN HÀNH TẠO WEB BẰNG TAY</button>
+                    <button type="submit" class="btn-save"><i class="ph ph-hammer"></i> TẠO WEB BẰNG TAY</button>
                 </form>
             </div>
         </div>
 
         <div class="center-card-wrap" style="max-width: 1000px;">
             <div class="quick-card">
-                <div class="field-label" style="margin-bottom: 15px;">CÁC WEB ĐANG HOẠT ĐỘNG CỦA BẠN</div>
+                <div class="field-label" style="margin-bottom: 15px;"><i class="ph ph-hard-drives"></i> CÁC WEB ĐANG HOẠT ĐỘNG CỦA BẠN</div>
                 <div class="manage-wrap">
                     <table class="manage-table">
                         <thead>
@@ -552,7 +585,7 @@ app.listen(PORT, () => console.log('Running'));</textarea>
                             </tr>
                         </thead>
                         <tbody>
-                            ${rowsHtml || `<tr><td colspan="${isAdmin ? 5 : 4}" style="text-align:center; color:#52525b; padding: 20px;">Bạn chưa tạo web nào.</td></tr>`}
+                            ${rowsHtml || `<tr><td colspan="${isAdmin ? 5 : 4}" style="text-align:center; color:var(--vs-text); padding: 20px;">Bạn chưa tạo web nào.</td></tr>`}
                         </tbody>
                     </table>
                 </div>
@@ -606,9 +639,9 @@ app.listen(PORT, () => console.log('Running'));</textarea>
                 const result = await response.json();
                 
                 if (result.success) {
-                    await appendTerm('<span style="color:var(--vs-green);">> NPM: Cài đặt hoàn tất!</span>', 0);
+                    await appendTerm('<span style="color:var(--vs-white);">> NPM: Cài đặt hoàn tất!</span>', 0);
                     await appendTerm('> Server: Đang khởi động Node.js backend...', 800);
-                    await appendTerm('<br><span style="color:var(--vs-gold); font-size:16px; font-weight:bold;">[ TẠO WEB THÀNH CÔNG ]</span>', 800);
+                    await appendTerm('<br><span style="color:var(--vs-white); font-size:16px; font-weight:bold;">[ TẠO WEB THÀNH CÔNG ]</span>', 800);
                     await appendTerm('Link proxy: ' + window.location.origin + '/app/' + result.name, 500);
                     await appendTerm('Hệ thống tải lại trang sau 3 giây...', 1000);
                     
@@ -616,11 +649,11 @@ app.listen(PORT, () => console.log('Running'));</textarea>
                         window.location.href = '/api-hosting?msg=Tạo web thành công!';
                     }, 3000);
                 } else {
-                    await appendTerm('<br><span style="color:var(--vs-red);">[ LỖI ] ' + result.message + '</span>', 0);
-                    await appendTerm('<button onclick="document.getElementById(\\'loader-overlay\\').style.display=\\'none\\'" style="margin-top:15px; padding:8px; background:#ef4444; color:white; border:none; cursor:pointer;">ĐÓNG</button>', 0);
+                    await appendTerm('<br><span style="color:#ef4444;">[ LỖI ] ' + result.message + '</span>', 0);
+                    await appendTerm('<button onclick="document.getElementById(\\'loader-overlay\\').style.display=\\'none\\'" style="margin-top:15px; padding:8px 16px; background:#fff; color:#000; border:none; cursor:pointer; font-weight:bold; border-radius:6px; font-family:\\'Orbitron\\'">ĐÓNG</button>', 0);
                 }
             } catch (err) {
-                await appendTerm('<br><span style="color:var(--vs-red);">[ LỖI MẠNG ] Không thể kết nối tới server.</span>', 0);
+                await appendTerm('<br><span style="color:#ef4444;">[ LỖI MẠNG ] Không thể kết nối tới server.</span>', 0);
             }
         }
         </script>
@@ -779,12 +812,161 @@ app.post('/api-action/:action/:id', (req, res) => {
     res.redirect('/api-hosting');
 });
 
+
 // ============================================================================
-// 3. CHAT VN & CHAT GLOBAL
+// 3. SERVER JOIN ID API LUA -> WEB LINK
 // ============================================================================
-const chatTemplate = (title, badgeClass, welcomeMsg) => `
+// API For Lua HTTP Request to POST server info
+app.post('/api/push-join', (req, res) => {
+    let { owner, gameName, joinLink, jobId, placeId } = req.body;
+    
+    if (!joinLink && jobId && placeId) {
+        joinLink = `roblox://experiences/start?placeId=${placeId}&gameInstanceId=${jobId}`;
+    }
+    if (!joinLink) return res.status(400).json({ error: "Missing link or jobId/placeId" });
+    
+    const joinId = crypto.randomBytes(3).toString('hex').toUpperCase();
+    joinDb.unshift({
+        id: joinId,
+        owner: owner || 'Anonymous',
+        gameName: gameName || 'Unknown Experience',
+        joinLink: joinLink,
+        time: Date.now()
+    });
+    
+    if (joinDb.length > 100) joinDb.pop(); // Keep last 100 entries
+    saveJoinDb();
+    
+    res.json({ success: true, joinId, message: "JobId successfully pushed to Web UI." });
+});
+
+// For GET requests just in case it is simpler for basic scripts
+app.get('/api/push-join', (req, res) => {
+    let { owner, gameName, joinLink, jobId, placeId } = req.query;
+    
+    if (!joinLink && jobId && placeId) {
+        joinLink = `roblox://experiences/start?placeId=${placeId}&gameInstanceId=${jobId}`;
+    }
+    if (!joinLink) return res.status(400).json({ error: "Missing required parameters." });
+    
+    const joinId = crypto.randomBytes(3).toString('hex').toUpperCase();
+    joinDb.unshift({
+        id: joinId,
+        owner: owner || 'Anonymous',
+        gameName: gameName || 'Unknown Experience',
+        joinLink: joinLink,
+        time: Date.now()
+    });
+    
+    if (joinDb.length > 100) joinDb.pop();
+    saveJoinDb();
+    
+    res.json({ success: true, joinId, message: "Pushed to Web UI." });
+});
+
+app.get('/joins', (req, res) => {
+    const user = getCookie(req, 'user_session');
+    const isAdmin = user === 'master1';
+    let htmlRows = '';
+    
+    joinDb.forEach(j => {
+        if (isAdmin || j.owner === user || j.owner === 'Anonymous' || user) {
+            htmlRows += `
+                <tr>
+                    <td><span style="color:var(--vs-white); font-weight:bold; font-family:'Orbitron';">#${j.id}</span></td>
+                    <td style="color: var(--vs-text-light);"><i class="ph-fill ph-game-controller" style="margin-right:4px;"></i> ${escapeHTML(j.gameName)}</td>
+                    <td style="color: var(--vs-text);"><i class="ph ph-user"></i> ${escapeHTML(j.owner)}</td>
+                    <td style="color:var(--vs-text); font-size:12px;">${new Date(j.time).toLocaleString()}</td>
+                    <td><a href="${j.joinLink}" class="btn-action" style="padding: 10px 15px; border-radius: 8px;"><i class="ph-fill ph-rocket-launch"></i> JOIN SERVER</a></td>
+                </tr>
+            `;
+        }
+    });
+
+    const hostHeader = req.headers['x-forwarded-proto'] || req.protocol + '://' + req.get('host');
+    const snippetCode = `local HttpService = game:GetService("HttpService")
+local host = "${hostHeader}"
+local owner = "${user || 'Anonymous'}"
+local gameName = game:GetService("MarketplaceService"):GetProductInfo(game.PlaceId).Name
+
+request({
+    Url = host .. "/api/push-join",
+    Method = "POST",
+    Headers = {["Content-Type"] = "application/json"},
+    Body = HttpService:JSONEncode({
+        owner = owner,
+        gameName = gameName,
+        placeId = game.PlaceId,
+        jobId = game.JobId
+    })
+})`;
+
+    const content = `
+        <section class="hero">
+            <div class="hero-badge"><i class="ph ph-link"></i> ROBLOX JOIN MANAGER</div>
+            <h1><span class="line2">LIVE SERVER JOINS</span></h1>
+            <p style="color:var(--vs-text); font-family:'JetBrains Mono'; font-size:14px;">Instant transition from Lua Scripts directly to Web Interface.</p>
+        </section>
+        
+        <div class="center-card-wrap">
+            <div class="quick-card">
+                <div class="field-label" style="margin-bottom: 10px;"><i class="ph ph-code"></i> HOW TO PUSH JOBID FROM LUA?</div>
+                <div class="result-box" style="margin-bottom:25px; margin-top:0;">
+                    <button type="button" class="copy-btn" onclick="copyText('lua-snippet', this)"><i class="ph ph-copy"></i> COPY SCRIPT</button>
+                    <div class="code-preview" id="lua-snippet">${snippetCode}</div>
+                </div>
+                
+                <div class="field-label"><i class="ph ph-clock-counter-clockwise"></i> RECENT SERVER JOINS</div>
+                <div class="manage-wrap">
+                    <table class="manage-table">
+                        <thead>
+                            <tr>
+                                <th>JOIN ID</th>
+                                <th>GAME NAME</th>
+                                <th>LUA OWNER</th>
+                                <th>PUSHED AT</th>
+                                <th>ACTION</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            ${htmlRows || '<tr><td colspan="5" style="text-align:center; padding: 20px; color:var(--vs-text);">No server joins have been pushed yet.</td></tr>'}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    `;
+    res.send(baseHTML(content, user));
+});
+
+
+// ============================================================================
+// 4. CHAT VN & CHAT GLOBAL (PERSISTENT API)
+// ============================================================================
+app.get('/api/chat/:room', (req, res) => {
+    const room = req.params.room;
+    if (room !== 'vn' && room !== 'global') return res.status(400).json({ error: 'Invalid room' });
+    res.json({ chat: chatDb[room] });
+});
+
+app.post('/api/chat/:room', (req, res) => {
+    const room = req.params.room;
+    if (room !== 'vn' && room !== 'global') return res.status(400).json({ error: 'Invalid room' });
+    
+    const user = getCookie(req, 'user_session') || 'Anonymous';
+    const { message } = req.body;
+    if (!message || message.trim() === '') return res.status(400).json({ error: 'Empty message' });
+
+    chatDb[room].push({ user: user, message: message.trim(), time: Date.now() });
+    if (chatDb[room].length > 150) chatDb[room].shift(); // Giới hạn 150 tin nhắn
+    saveChat();
+    
+    res.json({ success: true });
+});
+
+const chatTemplate = (title, badgeClass, welcomeMsg, roomName, userSession) => `
     <section class="hero">
-        <div class="hero-badge ${badgeClass}">${title.toUpperCase()} SERVER</div>
+        <div class="hero-badge"><i class="ph ph-chats"></i> ${title.toUpperCase()} SERVER</div>
         <h1><span class="line2">${title}</span></h1>
     </section>
     <div class="center-card-wrap" style="max-width: 800px;">
@@ -793,58 +975,111 @@ const chatTemplate = (title, badgeClass, welcomeMsg) => `
                 <div class="chat-msg msg-bot">${welcomeMsg}</div>
             </div>
             <div class="chat-input-area">
-                <button class="btn-attach" title="Attach File/Image" onclick="document.getElementById('fileUpload').click()">+</button>
+                <button class="btn-attach" title="Attach File/Image" onclick="document.getElementById('fileUpload').click()"><i class="ph ph-paperclip"></i></button>
                 <input type="file" id="fileUpload" style="display:none" accept="image/*,video/*,.txt,.lua,.zip">
-                <input type="text" class="chat-input" placeholder="Type your message here..." id="chatInput">
-                <button class="btn-send" onclick="sendUI()">SEND</button>
+                <input type="text" class="chat-input" placeholder="Type your message here..." id="chatInput" onkeypress="if(event.key === 'Enter') sendUI()">
+                <button class="btn-send" onclick="sendUI()"><i class="ph-fill ph-paper-plane-right"></i> SEND</button>
             </div>
         </div>
     </div>
     <script>
-        function sendUI() {
+        let currentRoom = '${roomName}';
+        let currentUser = '${userSession || 'Anonymous'}';
+
+        function escapeHTML(str) {
+            return (str || '').replace(/[&<>'"]/g, tag => ({
+                '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;'
+            }[tag] || tag));
+        }
+
+        async function fetchChat() {
+            try {
+                const res = await fetch('/api/chat/' + currentRoom);
+                const data = await res.json();
+                renderChat(data.chat);
+            } catch (e) {}
+        }
+
+        function renderChat(chatList) {
+            const chatArea = document.getElementById('chatArea');
+            const isScrolledToBottom = chatArea.scrollHeight - chatArea.clientHeight <= chatArea.scrollTop + 50;
+            
+            chatArea.innerHTML = '<div class="chat-msg msg-bot">${welcomeMsg}</div>';
+            chatList.forEach(c => {
+                const isMe = c.user === currentUser;
+                const msgDiv = document.createElement('div');
+                msgDiv.innerHTML = '<b style="color:' + (isMe ? 'var(--vs-white)' : 'var(--vs-text)') + '; font-family:Orbitron; font-size: 12px; display:flex; align-items:center; gap:4px;"><i class="ph-fill ph-user"></i> ' + escapeHTML(c.user) + '</b><br><span style="margin-top:4px; display:block;">' + escapeHTML(c.message) + '</span>';
+                
+                if (isMe) {
+                    msgDiv.className = 'chat-msg msg-user';
+                } else {
+                    msgDiv.className = 'chat-msg msg-bot';
+                }
+                chatArea.appendChild(msgDiv);
+            });
+
+            if (isScrolledToBottom) {
+                chatArea.scrollTop = chatArea.scrollHeight;
+            }
+        }
+
+        async function sendUI() {
             const input = document.getElementById('chatInput');
             const val = input.value.trim();
             if(!val) return;
-            const chatArea = document.getElementById('chatArea');
-            chatArea.innerHTML += \`<div class="chat-msg msg-user">\${val}</div>\`;
             input.value = '';
+            
+            // Lạc quan update UI trước
+            const chatArea = document.getElementById('chatArea');
+            chatArea.innerHTML += '<div class="chat-msg msg-user"><b style="color:var(--vs-white); font-family:Orbitron; font-size: 12px; display:flex; align-items:center; gap:4px;"><i class="ph-fill ph-user"></i> ' + escapeHTML(currentUser) + '</b><br><span style="margin-top:4px; display:block;">' + escapeHTML(val) + '</span></div>';
             chatArea.scrollTop = chatArea.scrollHeight;
+
+            await fetch('/api/chat/' + currentRoom, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ message: val })
+            });
+            fetchChat();
         }
+
+        setInterval(fetchChat, 3000);
+        setTimeout(fetchChat, 200);
     </script>
 `;
 
 app.get('/chat-vn', (req, res) => {
     const user = getCookie(req, 'user_session');
-    res.send(baseHTML(chatTemplate('VN Chat', 'badge-vn', 'Chào mừng đến với máy chủ chat Việt Nam. Bạn có thể gửi file, ảnh và video bằng nút (+).'), user));
+    res.send(baseHTML(chatTemplate('VN Chat', 'badge-vn', 'Chào mừng đến với máy chủ chat Việt Nam. Tin nhắn được lưu trữ vĩnh viễn trên Server.', 'vn', user), user));
 });
 
 app.get('/chat-global', (req, res) => {
     const user = getCookie(req, 'user_session');
-    res.send(baseHTML(chatTemplate('Global Chat', 'badge-global', 'Welcome to the Global Hub Chat. Use the (+) button to attach files, images, or videos.'), user));
+    res.send(baseHTML(chatTemplate('Global Chat', 'badge-global', 'Welcome to the Global Hub Chat. All messages are securely persisted on the Server.', 'global', user), user));
 });
 
+
 // ============================================================================
-// 4. CORE ROUTES (HOME, DASHBOARD, LOGIN, TOS, RAW V1)
+// 5. CORE ROUTES (HOME, DASHBOARD, LOGIN, TOS, RAW V1)
 // ============================================================================
 app.get('/', (req, res) => {
     const user = getCookie(req, 'user_session');
     res.send(baseHTML(`
         <section class="hero">
-            <div class="hero-badge">BRAND NEW RAW SYSTEM WITH ANTI-SKID</div>
+            <div class="hero-badge"><i class="ph-fill ph-shield-check"></i> BRAND NEW RAW SYSTEM WITH ANTI-SKID</div>
             <h1><span class="line2">RAW HUB CODESHARE</span></h1>
         </section>
         <div class="center-card-wrap">
             <div class="quick-card">
                 <form action="/create" method="POST">
                     <div class="header-flex">
-                        <label class="field-label" style="margin: 0;">SCRIPT CONTENT (LUA / TXT)</label>
+                        <label class="field-label" style="margin: 0;"><i class="ph ph-file-code"></i> SCRIPT CONTENT (LUA / TXT)</label>
                         <label class="btn-upload">
-                            📁 UPLOAD FILE...
+                            <i class="ph ph-upload-simple" style="font-size:16px;"></i> UPLOAD FILE...
                             <input type="file" accept=".lua,.txt,.luau,.js" onchange="handleFileUpload(event)">
                         </label>
                     </div>
                     <textarea id="codeArea" name="code" placeholder="-- Type your script here, or click [UPLOAD FILE] to insert code..." required></textarea>
-                    <button type="submit" class="btn-save">SECURE & GENERATE RAW LINK</button>
+                    <button type="submit" class="btn-save"><i class="ph-fill ph-lock-key"></i> SECURE & GENERATE RAW LINK</button>
                 </form>
             </div>
         </div>
@@ -869,15 +1104,15 @@ app.post('/create', (req, res) => {
         <div class="center-card-wrap" style="max-width: 650px;">
             <div class="quick-card">
                 <div class="result-box">
-                    <div style="font-size: 11px; color: #a1a1aa; margin-bottom: 5px;">EXECUTOR LOADSTRING:</div>
-                    <button type="button" class="copy-btn" onclick="copyText('loadstring-text', this)">COPY</button>
+                    <div style="font-size: 11px; color: var(--vs-text); margin-bottom: 5px;"><i class="ph ph-terminal"></i> EXECUTOR LOADSTRING:</div>
+                    <button type="button" class="copy-btn" onclick="copyText('loadstring-text', this)"><i class="ph ph-copy"></i> COPY</button>
                     <div class="code-preview" id="loadstring-text">${loadstringCommand}</div>
                 </div>
                 <div style="text-align: center; margin-top: 20px; font-size: 13px;">
-                    View Raw Link: <a href="${rawLink}" target="_blank" style="color: var(--vs-cyan); font-weight: bold;">${rawLink}</a>
+                    View Raw Link: <a href="${rawLink}" target="_blank" style="color: var(--vs-white); font-weight: bold; text-decoration:underline;">${rawLink}</a>
                 </div>
                 <br>
-                <a href="/" class="btn-save" style="background: rgba(6,182,212,0.1); border: 1px solid var(--vs-cyan);">CREATE ANOTHER</a>
+                <a href="/" class="btn-save" style="background: var(--vs-black); color: var(--vs-text-light); border: 1px solid var(--vs-border);"><i class="ph ph-plus"></i> CREATE ANOTHER</a>
             </div>
         </div>
     `, user === 'guest_anonymous' ? null : user));
@@ -889,16 +1124,16 @@ app.get('/register', (req, res) => {
         <section class="hero"><h1><span class="line2">CREATE NEW ACCOUNT</span></h1></section>
         <div class="center-card-wrap" style="max-width: 450px;">
             <div class="quick-card">
-                ${error ? `<div class="alert">${escapeHTML(error)}</div>` : ''}
+                ${error ? `<div class="alert"><i class="ph-fill ph-warning"></i> ${escapeHTML(error)}</div>` : ''}
                 <form action="/register" method="POST">
-                    <label class="field-label">USERNAME</label>
+                    <label class="field-label"><i class="ph ph-user"></i> USERNAME</label>
                     <input type="text" name="username" placeholder="Enter username..." required minlength="3">
-                    <label class="field-label">PASSWORD</label>
+                    <label class="field-label"><i class="ph ph-lock-key"></i> PASSWORD</label>
                     <input type="password" name="password" placeholder="Enter password..." required minlength="4">
-                    <button type="submit" class="btn-save" style="margin-top:10px;">REGISTER NOW</button>
+                    <button type="submit" class="btn-save" style="margin-top:10px;"><i class="ph ph-user-plus"></i> REGISTER NOW</button>
                 </form>
-                <div style="text-align:center; margin-top:20px; font-size:13px; color:#a1a1aa;">
-                    Already have an account? <a href="/login" style="color:var(--vs-cyan);">Login here</a>
+                <div style="text-align:center; margin-top:20px; font-size:13px; color:var(--vs-text);">
+                    Already have an account? <a href="/login" style="color:var(--vs-white); font-weight:bold;">Login here</a>
                 </div>
             </div>
         </div>
@@ -924,14 +1159,14 @@ app.get('/login', (req, res) => {
         <section class="hero"><h1><span class="line2">SYSTEM LOGIN</span></h1></section>
         <div class="center-card-wrap" style="max-width: 450px;">
             <div class="quick-card">
-                ${error ? `<div class="alert">${escapeHTML(error)}</div>` : ''}
-                ${success ? `<div class="alert alert-success">${escapeHTML(success)}</div>` : ''}
+                ${error ? `<div class="alert"><i class="ph-fill ph-warning"></i> ${escapeHTML(error)}</div>` : ''}
+                ${success ? `<div class="alert alert-success"><i class="ph-fill ph-check-circle"></i> ${escapeHTML(success)}</div>` : ''}
                 <form action="/login" method="POST">
-                    <label class="field-label">USERNAME</label>
+                    <label class="field-label"><i class="ph ph-user"></i> USERNAME</label>
                     <input type="text" name="username" placeholder="Enter username..." required>
-                    <label class="field-label">PASSWORD</label>
+                    <label class="field-label"><i class="ph ph-lock-key"></i> PASSWORD</label>
                     <input type="password" name="password" placeholder="Enter password..." required>
-                    <button type="submit" class="btn-save" style="margin-top:10px;">ACCESS SYSTEM</button>
+                    <button type="submit" class="btn-save" style="margin-top:10px;"><i class="ph ph-sign-in"></i> ACCESS SYSTEM</button>
                 </form>
             </div>
         </div>
@@ -962,9 +1197,9 @@ app.get('/dashboard', (req, res) => {
         return res.send(baseHTML(`
             <div class="center-card-wrap" style="margin-top:80px; max-width:500px; text-align:center;">
                 <div class="quick-card">
-                    <h2 style="color:var(--vs-red); font-family:'Orbitron'">ACCESS DENIED</h2>
-                    <p style="color:#a1a1aa; font-size:14px; margin-bottom: 20px;">You must log in to access the script management panel.</p>
-                    <a href="/login" class="btn-save">LOGIN NOW</a>
+                    <h2 style="color:var(--vs-white); font-family:'Orbitron'"><i class="ph-fill ph-warning" style="color:var(--vs-text);"></i> ACCESS DENIED</h2>
+                    <p style="color:var(--vs-text); font-size:14px; margin-bottom: 20px;">You must log in to access the script management panel.</p>
+                    <a href="/login" class="btn-save"><i class="ph ph-key"></i> LOGIN NOW</a>
                 </div>
             </div>
         `));
@@ -982,15 +1217,15 @@ app.get('/dashboard', (req, res) => {
         if (isAdmin || val.owner === user) {
             rowsHtml += `
                 <tr>
-                    <td style="color:var(--vs-cyan); font-weight:bold;">${key}</td>
+                    <td style="color:var(--vs-white); font-weight:bold; font-family:'JetBrains Mono';">${key}</td>
                     ${isAdmin ? `<td><span class="badge-admin">${val.owner.toUpperCase()}</span></td>` : ''}
-                    <td style="max-width:180px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color: #a5f3fc;">
+                    <td style="max-width:180px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color: var(--vs-text-light);">
                         ${escapeHTML(val.code.substring(0, 35))}...
                     </td>
                     <td>
-                        <a href="/edit/${key}" class="btn-action btn-edit">EDIT</a>
-                        <a href="/delete/${key}" class="btn-action btn-delete" onclick="return confirm('Confirm delete?')">DEL</a>
-                        ${isAdmin ? `<a href="/download/${key}" class="btn-action btn-download">DL</a>` : ''}
+                        <a href="/edit/${key}" class="btn-action"><i class="ph ph-pencil-simple"></i> EDIT</a>
+                        <a href="/delete/${key}" class="btn-action btn-delete" onclick="return confirm('Confirm delete?')"><i class="ph ph-trash"></i> DEL</a>
+                        ${isAdmin ? `<a href="/download/${key}" class="btn-action"><i class="ph ph-download-simple"></i> DL</a>` : ''}
                     </td>
                 </tr>
             `;
@@ -1002,12 +1237,12 @@ app.get('/dashboard', (req, res) => {
         <div class="center-card-wrap" style="max-width: 900px;">
             <div class="quick-card">
                 <div class="field-label" style="margin-bottom: 15px;">
-                    ${isAdmin ? 'ALL SYSTEM SCRIPTS (Admin View)' : `CODES FOR [${escapeHTML(user.toUpperCase())}]:`}
+                    <i class="ph ph-folder-open"></i> ${isAdmin ? 'ALL SYSTEM SCRIPTS (Admin View)' : `CODES FOR [${escapeHTML(user.toUpperCase())}]:`}
                 </div>
-                <div style="margin-bottom: 20px; padding: 12px; background: rgba(0,0,0,0.5); border-radius: 8px; border-left: 4px solid ${isAdmin ? 'var(--vs-gold)' : 'var(--vs-cyan)'};">
+                <div style="margin-bottom: 20px; padding: 12px; background: rgba(255,255,255,0.02); border-radius: 8px; border-left: 4px solid var(--vs-white);">
                     ${isAdmin 
-                        ? `<span style="font-size:12px; color:#a1a1aa;">* Admin Note: Admin scripts older than 7 days are automatically hidden.</span>`
-                        : `<div class="cyber-text-alert">⚡ V1 PROTECTION: LAYER 7 ANTI-SKID FIREWALL ACTIVE.</div>`
+                        ? `<span style="font-size:12px; color:var(--vs-text);"><i class="ph-fill ph-info"></i> Admin Note: Admin scripts older than 7 days are automatically hidden.</span>`
+                        : `<div class="cyber-text-alert"><i class="ph-fill ph-shield-check"></i> V1 PROTECTION: LAYER 7 ANTI-SKID FIREWALL ACTIVE.</div>`
                     }
                 </div>
                 <div class="manage-wrap">
@@ -1021,7 +1256,7 @@ app.get('/dashboard', (req, res) => {
                             </tr>
                         </thead>
                         <tbody>
-                            ${rowsHtml || `<tr><td colspan="${isAdmin ? 4 : 3}" style="text-align:center; color:#52525b; padding: 20px;">No scripts found.</td></tr>`}
+                            ${rowsHtml || `<tr><td colspan="${isAdmin ? 4 : 3}" style="text-align:center; color:var(--vs-text); padding: 20px;">No scripts found.</td></tr>`}
                         </tbody>
                     </table>
                 </div>
@@ -1060,23 +1295,23 @@ app.get('/edit/:id', (req, res) => {
         <section class="hero"><h1><span class="line2">EDIT SCRIPT [${id}]</span></h1></section>
         <div class="center-card-wrap">
             <div class="quick-card">
-                <div class="result-box" style="margin-top: 0; margin-bottom: 25px; border-color: var(--vs-purple);">
-                    <div style="font-size: 11px; color: var(--vs-cyan); margin-bottom: 5px; font-weight: bold; font-family: 'Orbitron';">LOADSTRING COMMAND:</div>
-                    <button type="button" class="copy-btn" onclick="copyText('loadstring-text-edit', this)">COPY</button>
+                <div class="result-box" style="margin-top: 0; margin-bottom: 25px;">
+                    <div style="font-size: 11px; color: var(--vs-white); margin-bottom: 5px; font-weight: bold; font-family: 'Orbitron';"><i class="ph ph-terminal-window"></i> LOADSTRING COMMAND:</div>
+                    <button type="button" class="copy-btn" onclick="copyText('loadstring-text-edit', this)"><i class="ph ph-copy"></i> COPY</button>
                     <div class="code-preview" id="loadstring-text-edit" style="color: #fff;">${loadstringCommand}</div>
                 </div>
                 <form action="/edit/${id}" method="POST">
-                    <div style="background: rgba(168,85,247,0.1); padding: 15px; border-radius: 8px; border: 1px solid var(--vs-border); margin-bottom: 20px;">
-                        <div class="field-label">METHOD 1: UPLOAD NEW FILE</div>
-                        <p style="font-size: 12px; color: #a1a1aa; margin: 5px 0 10px 0;">Click below to overwrite current code with a local file.</p>
-                        <label class="btn-upload" style="background: var(--vs-purple); color: white; border: none;">
-                            📁 SELECT FILE...
+                    <div style="background: rgba(255,255,255,0.02); padding: 15px; border-radius: 8px; border: 1px solid var(--vs-border); margin-bottom: 20px;">
+                        <div class="field-label"><i class="ph ph-upload-simple"></i> METHOD 1: UPLOAD NEW FILE</div>
+                        <p style="font-size: 12px; color: var(--vs-text); margin: 5px 0 10px 0;">Click below to overwrite current code with a local file.</p>
+                        <label class="btn-upload" style="background: var(--vs-white); color: var(--vs-black); border: none;">
+                            <i class="ph ph-folder-open" style="font-size:16px;"></i> SELECT FILE...
                             <input type="file" accept=".lua,.txt,.luau,.js" onchange="handleFileUpload(event)">
                         </label>
                     </div>
-                    <div class="field-label" style="margin-top: 20px;">METHOD 2: DIRECT EDIT</div>
+                    <div class="field-label" style="margin-top: 20px;"><i class="ph ph-keyboard"></i> METHOD 2: DIRECT EDIT</div>
                     <textarea id="codeArea" name="code" required>${escapeHTML(scriptData.code)}</textarea>
-                    <button type="submit" class="btn-save">SAVE CHANGES TO SERVER</button>
+                    <button type="submit" class="btn-save"><i class="ph ph-floppy-disk"></i> SAVE CHANGES TO SERVER</button>
                 </form>
             </div>
         </div>
@@ -1115,12 +1350,12 @@ app.get('/tos', (req, res) => {
     const user = getCookie(req, 'user_session');
     res.send(baseHTML(`
         <section class="hero">
-            <div class="hero-badge">LEGAL & COMPLIANCE</div>
+            <div class="hero-badge"><i class="ph ph-gavel"></i> LEGAL & COMPLIANCE</div>
             <h1><span class="line2">TERMS OF SERVICE</span></h1>
         </section>
         <div class="center-card-wrap" style="max-width: 800px;">
             <div class="quick-card">
-                <div class="cyber-text-alert" style="text-align:center; margin-bottom: 20px;">LAST UPDATED: 2026</div>
+                <div class="cyber-text-alert" style="justify-content:center; margin-bottom: 20px;"><i class="ph-fill ph-clock-counter-clockwise"></i> LAST UPDATED: 2026</div>
                 <div class="tos-list">
                     <div class="tos-item">
                         <div class="tos-title"><span>01 //</span> Redistribution</div>
