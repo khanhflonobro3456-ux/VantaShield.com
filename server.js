@@ -1,6 +1,8 @@
 const express = require('express');
 const crypto = require('crypto');
 const fs = require('fs');
+const path = require('path');
+const { spawn } = require('child_process');
 const app = express();
 
 // ============================================================================
@@ -15,9 +17,11 @@ app.use(express.static(__dirname));
 // ============================================================================
 const DB_FILE = './vantashield_scripts.json';
 const USERS_FILE = './vantashield_users.json';
+const APIS_FILE = './vantashield_apis.json'; // Database cho Web API
 
 let db = new Map();
 let usersDb = new Map();
+let apisDb = new Map();
 
 // Load existing data
 if (fs.existsSync(DB_FILE)) {
@@ -25,6 +29,16 @@ if (fs.existsSync(DB_FILE)) {
 }
 if (fs.existsSync(USERS_FILE)) {
     usersDb = new Map(Object.entries(JSON.parse(fs.readFileSync(USERS_FILE, 'utf8'))));
+}
+if (fs.existsSync(APIS_FILE)) {
+    apisDb = new Map(Object.entries(JSON.parse(fs.readFileSync(APIS_FILE, 'utf8'))));
+    // Reset trạng thái các API về OFFLINE khi server khởi động lại
+    apisDb.forEach((api, key) => {
+        api.status = 'OFFLINE';
+        api.pid = null;
+        apisDb.set(key, api);
+    });
+    saveApis();
 }
 
 // Master Admin Default
@@ -35,6 +49,7 @@ if (!usersDb.has('master1')) {
 
 function saveDb() { fs.writeFileSync(DB_FILE, JSON.stringify(Object.fromEntries(db))); }
 function saveUsers() { fs.writeFileSync(USERS_FILE, JSON.stringify(Object.fromEntries(usersDb))); }
+function saveApis() { fs.writeFileSync(APIS_FILE, JSON.stringify(Object.fromEntries(apisDb))); }
 
 // Utilities
 function getCookie(req, name) {
@@ -44,6 +59,7 @@ function getCookie(req, name) {
 }
 
 function escapeHTML(str) {
+    if (!str) return '';
     return str.replace(/[&<>'"]/g, tag => ({
         '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;'
     }[tag]));
@@ -54,8 +70,18 @@ function isRobloxExecutor(req) {
     return userAgent.includes('roblox') || userAgent.includes('rblx') || !userAgent.includes('mozilla');
 }
 
+function getFreePort() {
+    let maxPort = 8000;
+    apisDb.forEach(api => {
+        if (api.port && api.port >= maxPort) maxPort = api.port + 1;
+    });
+    return maxPort;
+}
+
+const runningProcesses = {};
+
 // ============================================================================
-// 1. STYLE, CSS & CLIENT-SIDE SCRIPTS (AUTO-TRANSLATE, CHAT)
+// 1. STYLE, CSS & CLIENT-SIDE SCRIPTS
 // ============================================================================
 const style = `
 <style>
@@ -144,6 +170,8 @@ input[type="file"] { display: none; }
 .btn-edit { background: var(--vs-gold); color: #000; }
 .btn-delete { background: var(--vs-red); color: #fff; }
 .btn-download { background: var(--vs-green); color: #fff; }
+.btn-open { background: var(--vs-cyan); color: #000; }
+.btn-start { background: var(--vs-purple); color: #fff; }
 .badge-admin { background: var(--vs-gold); color: #000; padding: 2px 6px; border-radius: 4px; font-size: 10px; font-weight: bold; }
 
 /* CHAT SYSTEM UI */
@@ -167,6 +195,7 @@ input[type="file"] { display: none; }
 .troll-sub { font-size: 20px; background: var(--vs-card); color: var(--vs-gold); padding: 12px 25px; font-weight: bold; border-radius: 8px; border: 1px solid var(--vs-red); }
 @keyframes shake { 0% { transform: translate(2px, 2px); } 50% { transform: translate(-2px, -2px); } 100% { transform: translate(2px, -2px); } }
 .alert { padding: 15px; background: rgba(239, 68, 68, 0.1); border: 1px solid var(--vs-red); color: #fca5a5; border-radius: 8px; margin-bottom: 20px; text-align: center; font-weight: bold; }
+.alert-success { background: rgba(16, 185, 129, 0.1); border: 1px solid var(--vs-green); color: #6ee7b7; }
 
 /* TOS */
 .tos-list { text-align: left; margin-top: 20px; }
@@ -197,6 +226,24 @@ function copyText(elementId, btnElement) {
     document.body.removeChild(textArea);
 }
 
+// Chức năng copy link động cho Web API (dùng clipboard API)
+function copyApiLink(port, btnElement) {
+    const url = window.location.protocol + '//' + window.location.hostname + ':' + port;
+    if (navigator.clipboard) {
+        navigator.clipboard.writeText(url).then(() => {
+            btnElement.innerText = 'COPIED!'; 
+            btnElement.style.background = 'var(--vs-purple)'; btnElement.style.color = '#fff';
+            setTimeout(() => { btnElement.innerText = 'COPY LINK'; btnElement.style.background = 'var(--vs-gold)'; btnElement.style.color = '#000'; }, 2000);
+        });
+    }
+}
+
+// Chức năng mở Web API trực tiếp
+function openApiLink(port) {
+    const url = window.location.protocol + '//' + window.location.hostname + ':' + port;
+    window.open(url, '_blank');
+}
+
 // ============================================================================
 // AUTO-TRANSLATE SYSTEM (DETECT VIETNAM IP / TIMEZONE)
 // ============================================================================
@@ -209,7 +256,7 @@ const viDict = {
     "Create Account": "Tạo Tài Khoản",
     "Creator Home": "Trang Chủ",
     "Script Management": "Quản Lý Mã Nguồn",
-    "API Hosting (Like Render)": "Lưu Trữ API (Giống Render)",
+    "API Hosting (Like Render)": "Lưu Trữ API",
     "VN Chat": "Trò Chuyện VN",
     "Global Chat": "Trò Chuyện Toàn Cầu",
     "Terms of Service": "Điều Khoản Dịch Vụ",
@@ -230,7 +277,7 @@ const viDict = {
     "Hệ thống sẽ tự động clone repo, đọc package.json và chạy server.js giống hệt Render.": "Hệ thống sẽ tự động clone repo, đọc package.json và chạy server.js giống hệt Render.",
     "CREATE WEB API DIRECTLY": "TẠO API TRỰC TIẾP TẠI WEB",
     "START SERVER": "KHỞI ĐỘNG SERVER",
-    "YOUR RUNNING APIS": "CÁC API ĐANG HOẠT ĐỘNG",
+    "YOUR HOSTED APIS": "CÁC API ĐANG HOẠT ĐỘNG",
     "PROJECT NAME": "TÊN DỰ ÁN",
     "SOURCE": "NGUỒN",
     "STATUS": "TRẠNG THÁI",
@@ -337,11 +384,42 @@ const baseHTML = (content, userSession = null) => {
 `};
 
 // ============================================================================
-// 2. NEW TABS: API HOSTING (RENDER CLONE) & CHAT VN/GLOBAL
+// 2. API HOSTING (RENDER CLONE) - HOẠT ĐỘNG THẬT VỚI CHILD_PROCESS
 // ============================================================================
 
 app.get('/api-hosting', (req, res) => {
     const user = getCookie(req, 'user_session');
+    if (!user) return res.redirect('/login?error=Bạn cần đăng nhập để sử dụng API Hosting.');
+
+    const isAdmin = user === 'master1';
+    let rowsHtml = '';
+    
+    apisDb.forEach((val, key) => {
+        if (isAdmin || val.owner === user) {
+            const statusColor = val.status === 'ONLINE' ? 'var(--vs-green)' : 'var(--vs-red)';
+            rowsHtml += `
+                <tr>
+                    <td style="color:var(--vs-cyan); font-weight:bold;">${escapeHTML(val.name)}</td>
+                    ${isAdmin ? `<td><span class="badge-admin">${val.owner.toUpperCase()}</span></td>` : ''}
+                    <td><span style="color: ${statusColor}; font-weight: bold;">${val.status === 'ONLINE' ? '🟢 ONLINE' : '🔴 OFFLINE'}</span></td>
+                    <td>Port: ${val.port}</td>
+                    <td>
+                        ${val.status === 'ONLINE' ? `
+                            <button class="btn-action btn-open" onclick="openApiLink(${val.port})">OPEN WEB</button>
+                            <button class="btn-action btn-edit" onclick="copyApiLink(${val.port}, this)">COPY LINK</button>
+                            <form action="/api-action/stop/${key}" method="POST" style="display:inline;"><button type="submit" class="btn-action btn-delete">STOP</button></form>
+                        ` : `
+                            <form action="/api-action/start/${key}" method="POST" style="display:inline;"><button type="submit" class="btn-action btn-start">START</button></form>
+                        `}
+                        <form action="/api-action/delete/${key}" method="POST" style="display:inline;" onsubmit="return confirm('Bạn có chắc muốn xóa API này vĩnh viễn?');"><button type="submit" class="btn-action btn-delete" style="background:#52525b;">DEL</button></form>
+                    </td>
+                </tr>
+            `;
+        }
+    });
+
+    const msg = req.query.msg;
+
     res.send(baseHTML(`
         <section class="hero">
             <div class="hero-badge" style="border-color: var(--vs-gold); color: var(--vs-gold); background: rgba(234, 179, 8, 0.1);">PaaS PLATFORM (LIKE RENDER)</div>
@@ -349,55 +427,48 @@ app.get('/api-hosting', (req, res) => {
             <p style="color:#a1a1aa; font-family:'JetBrains Mono'; font-size:14px;">Khởi chạy API 24/7 miễn phí. Liên kết với kho lưu trữ GitHub hoặc tạo trực tiếp trên web.</p>
         </section>
 
+        ${msg ? `<div class="center-card-wrap"><div class="alert alert-success">${escapeHTML(msg)}</div></div>` : ''}
+
         <div class="center-card-wrap" style="max-width: 900px; display: grid; grid-template-columns: 1fr 1fr; gap: 20px;">
-            
-            <!-- CÁCH 1: LIÊN KẾT GITHUB -->
+            <!-- LIÊN KẾT GITHUB (Giả lập UI cho tính thẩm mỹ) -->
             <div class="quick-card" style="padding: 25px;">
                 <div class="field-label" style="color: var(--vs-cyan); font-size: 15px; margin-bottom: 20px;">
                     <span style="font-size: 18px;">🔗</span> DEPLOY FROM GITHUB
                 </div>
-                <form action="/deploy-github" method="POST">
+                <form action="#" method="POST">
                     <label class="field-label">GITHUB REPO URL</label>
                     <input type="text" name="repo_url" placeholder="https://github.com/user/repo" required style="margin-bottom: 15px;">
                     
                     <label class="field-label">BRANCH</label>
                     <input type="text" name="branch" placeholder="main" value="main" required style="margin-bottom: 15px;">
                     
-                    <button type="button" class="btn-save" style="background: linear-gradient(135deg, #2ea043, #238636); margin-top: 10px;" onclick="alert('Đang kết nối tới GitHub...')">DEPLOY API</button>
+                    <button type="button" class="btn-save" style="background: linear-gradient(135deg, #2ea043, #238636); margin-top: 10px;" onclick="alert('Tính năng Github Deploy đang bảo trì, vui lòng dùng cách CREATE WEB API DIRECTLY bên cạnh!')">DEPLOY API</button>
                 </form>
                 <p style="font-size: 11px; color: #a1a1aa; margin-top: 15px;">Hệ thống sẽ tự động clone repo, đọc package.json và chạy server.js giống hệt Render.</p>
             </div>
 
-            <!-- CÁCH 2: TẠO TRỰC TIẾP TRÊN WEB -->
+            <!-- TẠO TRỰC TIẾP TRÊN WEB (Hoạt động 100%) -->
             <div class="quick-card" style="padding: 25px;">
                 <div class="field-label" style="color: var(--vs-purple); font-size: 15px; margin-bottom: 20px;">
                     <span style="font-size: 18px;">⚡</span> CREATE WEB API DIRECTLY
                 </div>
                 <form action="/deploy-local" method="POST">
-                    <label class="field-label">package.json</label>
-                    <textarea name="pkg_json" style="height: 100px; margin-bottom: 15px; font-size: 12px;">{
-  "name": "my-api",
-  "version": "1.0.0",
-  "main": "server.js",
-  "dependencies": {
-    "express": "^4.19.2",
-    "cors": "^2.8.5"
-  }
-}</textarea>
+                    <label class="field-label">TÊN DỰ ÁN (PROJECT NAME)</label>
+                    <input type="text" name="project_name" placeholder="my-awesome-api" required style="margin-bottom: 15px;">
                     
                     <label class="field-label">server.js</label>
+                    <p style="font-size:11px; color:#a1a1aa; margin-top:-5px; margin-bottom:10px;">Lưu ý: Bạn có thể require('express') vì nó đã có sẵn trên hệ thống. Sử dụng <code>process.env.PORT</code> để nhận Port tự động.</p>
                     <textarea name="srv_js" style="height: 180px; margin-bottom: 15px; font-size: 12px;">const express = require('express');
-const cors = require('cors');
 const app = express();
-app.use(cors());
 
-app.get('/api', (req, res) => {
-    res.json({ status: 'Online 24/7', server: 'VantaShield Host' });
+app.get('/', (req, res) => {
+    res.json({ status: 'Online 24/7', server: 'VantaShield Host', port: process.env.PORT });
 });
 
-app.listen(3000);</textarea>
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log('Running on ' + PORT));</textarea>
                     
-                    <button type="button" class="btn-save" onclick="alert('Đang khởi tạo container API...')">START SERVER</button>
+                    <button type="submit" class="btn-save">DEPLOY & START SERVER</button>
                 </form>
             </div>
         </div>
@@ -405,29 +476,20 @@ app.listen(3000);</textarea>
         <!-- BẢNG QUẢN LÝ API ĐANG CHẠY -->
         <div class="center-card-wrap" style="max-width: 900px;">
             <div class="quick-card">
-                <div class="field-label" style="margin-bottom: 15px;">YOUR RUNNING APIS</div>
+                <div class="field-label" style="margin-bottom: 15px;">YOUR HOSTED APIS</div>
                 <div class="manage-wrap">
                     <table class="manage-table">
                         <thead>
                             <tr>
                                 <th>PROJECT NAME</th>
-                                <th>SOURCE</th>
+                                ${isAdmin ? '<th>OWNER</th>' : ''}
                                 <th>STATUS</th>
-                                <th>ENDPOINT</th>
+                                <th>PORT</th>
                                 <th>ACTIONS</th>
                             </tr>
                         </thead>
                         <tbody>
-                            <tr>
-                                <td style="color:var(--vs-cyan); font-weight:bold;">hop-server-api</td>
-                                <td>GitHub</td>
-                                <td><span style="color: var(--vs-green);">🟢 ONLINE (24/7)</span></td>
-                                <td><a href="#" style="color:#a5f3fc; text-decoration:underline;">/api/v1/hop</a></td>
-                                <td>
-                                    <button class="btn-action btn-edit">LOGS</button>
-                                    <button class="btn-action btn-delete">STOP</button>
-                                </td>
-                            </tr>
+                            ${rowsHtml || `<tr><td colspan="${isAdmin ? 5 : 4}" style="text-align:center; color:#52525b; padding: 20px;">Chưa có API nào đang chạy.</td></tr>`}
                         </tbody>
                     </table>
                 </div>
@@ -436,7 +498,113 @@ app.listen(3000);</textarea>
     `, user));
 });
 
-// CHAT SYSTEM TEMPLATE
+app.post('/deploy-local', (req, res) => {
+    const user = getCookie(req, 'user_session');
+    if (!user) return res.redirect('/login');
+
+    let { project_name, srv_js } = req.body;
+    project_name = project_name.trim().replace(/[^a-zA-Z0-9-_]/g, '');
+    if (!project_name) project_name = 'api-' + Date.now();
+
+    const apiId = crypto.randomBytes(4).toString('hex');
+    const port = getFreePort();
+    const apiDir = path.join(__dirname, 'hosted_apis', apiId);
+
+    if (!fs.existsSync(path.join(__dirname, 'hosted_apis'))) fs.mkdirSync(path.join(__dirname, 'hosted_apis'));
+    fs.mkdirSync(apiDir, { recursive: true });
+
+    let finalCode = srv_js;
+    fs.writeFileSync(path.join(apiDir, 'server.js'), finalCode);
+
+    apisDb.set(apiId, {
+        id: apiId,
+        owner: user,
+        name: project_name,
+        port: port,
+        status: 'OFFLINE', 
+        createdAt: Date.now()
+    });
+    saveApis();
+    startApiProcess(apiId);
+
+    res.redirect('/api-hosting?msg=Khởi tạo và chạy Web API thành công!');
+});
+
+function startApiProcess(apiId) {
+    const api = apisDb.get(apiId);
+    if (!api) return;
+
+    const apiDir = path.join(__dirname, 'hosted_apis', apiId);
+    
+    try {
+        const child = spawn('node', ['server.js'], {
+            cwd: apiDir,
+            env: { ...process.env, PORT: api.port } 
+        });
+
+        runningProcesses[apiId] = child;
+        api.status = 'ONLINE';
+        api.pid = child.pid;
+        apisDb.set(apiId, api);
+        saveApis();
+
+        child.on('exit', (code) => {
+            console.log(`[API HOSTING] Project ${api.name} (Port ${api.port}) exited with code ${code}`);
+            if (apisDb.has(apiId)) {
+                let dbApi = apisDb.get(apiId);
+                dbApi.status = 'OFFLINE';
+                dbApi.pid = null;
+                apisDb.set(apiId, dbApi);
+                saveApis();
+            }
+            delete runningProcesses[apiId];
+        });
+
+        child.on('error', (err) => {
+            console.error(`[API HOSTING ERROR] Project ${api.name}:`, err);
+        });
+
+    } catch(e) {
+        console.error("Lỗi khởi tạo Child Process", e);
+    }
+}
+
+app.post('/api-action/:action/:id', (req, res) => {
+    const user = getCookie(req, 'user_session');
+    const isAdmin = user === 'master1';
+    const { action, id } = req.params;
+    
+    const api = apisDb.get(id);
+    if (!api || (!isAdmin && api.owner !== user)) return res.redirect('/api-hosting');
+
+    if (action === 'stop' && runningProcesses[id]) {
+        runningProcesses[id].kill();
+        delete runningProcesses[id];
+        api.status = 'OFFLINE';
+        apisDb.set(id, api);
+        saveApis();
+        return res.redirect('/api-hosting?msg=Đã dừng API.');
+    } else if (action === 'start' && !runningProcesses[id]) {
+        startApiProcess(id);
+        return res.redirect('/api-hosting?msg=Đã khởi động lại API.');
+    } else if (action === 'delete') {
+        if (runningProcesses[id]) {
+            runningProcesses[id].kill();
+            delete runningProcesses[id];
+        }
+        const apiDir = path.join(__dirname, 'hosted_apis', id);
+        if (fs.existsSync(apiDir)) fs.rmSync(apiDir, { recursive: true, force: true });
+        apisDb.delete(id);
+        saveApis();
+        return res.redirect('/api-hosting?msg=Đã xóa API vĩnh viễn.');
+    }
+    res.redirect('/api-hosting');
+});
+
+// ============================================================================
+// 3. CHAT VN & CHAT GLOBAL
+// ============================================================================
+
 const chatTemplate = (title, badgeClass, welcomeMsg) => `
     <section class="hero">
         <div class="hero-badge ${badgeClass}">${title.toUpperCase()} SERVER</div>
@@ -478,8 +646,9 @@ app.get('/chat-global', (req, res) => {
     res.send(baseHTML(chatTemplate('Global Chat', 'badge-global', 'Welcome to the Global Hub Chat. Use the (+) button to attach files, images, or videos.'), user));
 });
 
+
 // ============================================================================
-// 3. CORE ROUTES (HOME, DASHBOARD, LOGIN, TOS, RAW V1)
+// 4. CORE ROUTES (HOME, DASHBOARD, LOGIN, TOS, RAW V1)
 // ============================================================================
 
 // HOME: CREATE SCRIPT
@@ -583,7 +752,7 @@ app.get('/login', (req, res) => {
         <div class="center-card-wrap" style="max-width: 450px;">
             <div class="quick-card">
                 ${error ? `<div class="alert">${escapeHTML(error)}</div>` : ''}
-                ${success ? `<div class="alert" style="background:rgba(6,182,212,0.1); border-color:var(--vs-cyan); color:var(--vs-cyan);">${escapeHTML(success)}</div>` : ''}
+                ${success ? `<div class="alert alert-success">${escapeHTML(success)}</div>` : ''}
                 <form action="/login" method="POST">
                     <label class="field-label">USERNAME</label>
                     <input type="text" name="username" placeholder="Enter username..." required>
@@ -614,7 +783,7 @@ app.get('/logout', (req, res) => {
     res.redirect('/');
 });
 
-// DASHBOARD
+// DASHBOARD QUẢN LÝ SCRIPT
 app.get('/dashboard', (req, res) => {
     const user = getCookie(req, 'user_session');
     if (!user) {
@@ -689,7 +858,7 @@ app.get('/dashboard', (req, res) => {
     `, user));
 });
 
-// EDIT, DELETE, DOWNLOAD
+// CHỈNH SỬA, XÓA, TẢI VỀ SCRIPT
 app.get('/download/:id', (req, res) => {
     const user = getCookie(req, 'user_session');
     if (user !== 'master1') return res.status(403).send("Admin strictly.");
@@ -800,7 +969,8 @@ app.get('/tos', (req, res) => {
     `, user));
 });
 
-// API RAW & ANTI SKID (V1 LAYER)
+
+// API RAW & ANTI SKID (V1 LAYER) - TROLL SCREEN
 app.all('/v1/:id', (req, res) => {
     const id = req.params.id;
     const data = db.get(id);
