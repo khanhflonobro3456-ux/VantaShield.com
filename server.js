@@ -1079,6 +1079,10 @@ app.get('/', (req, res) => {
                         </label>
                     </div>
                     <textarea id="codeArea" name="code" placeholder="-- Type your script here, or click [UPLOAD FILE] to insert code..." required></textarea>
+                    
+                    <label class="field-label" style="margin-top: 15px;"><i class="ph ph-text-t"></i> CUSTOM FILE NAME (OPTIONAL)</label>
+                    <input type="text" name="fileName" placeholder="e.g. auto-farm" pattern="[a-zA-Z0-9-_]+" title="Only letters, numbers, dashes and underscores">
+
                     <button type="submit" class="btn-save"><i class="ph-fill ph-lock-key"></i> SECURE & GENERATE RAW LINK</button>
                 </form>
             </div>
@@ -1088,15 +1092,19 @@ app.get('/', (req, res) => {
 
 app.post('/create', (req, res) => {
     const user = getCookie(req, 'user_session') || 'guest_anonymous';
-    const { code } = req.body;
+    const { code, fileName } = req.body;
     
     const id = crypto.randomBytes(4).toString('hex');
-    db.set(id, { code, owner: user, createdAt: Date.now() });
+    
+    // Process input variables for the raw URL
+    const safeFileName = (fileName && fileName.trim() !== '') ? fileName.trim().replace(/[^a-zA-Z0-9_-]/g, '') : id;
+    const rawCreatorName = user === 'guest_anonymous' ? 'anonymous' : user;
+
+    db.set(id, { code, owner: user, fileName: safeFileName, createdAt: Date.now() });
     saveDb(); 
     
-    const host = req.get('host');
-    const protocol = req.headers['x-forwarded-proto'] || req.protocol;
-    const rawLink = `${protocol}://${host}/v1/${id}`;
+    // Inject variables directly into the newly requested URL Format
+    const rawLink = `https://raw.vantashield.com/${rawCreatorName}/${safeFileName}/refs/heads/main/${safeFileName}`;
     const loadstringCommand = `loadstring(game:HttpGet("${rawLink}"))()`;
 
     res.send(baseHTML(`
@@ -1217,7 +1225,7 @@ app.get('/dashboard', (req, res) => {
         if (isAdmin || val.owner === user) {
             rowsHtml += `
                 <tr>
-                    <td style="color:var(--vs-white); font-weight:bold; font-family:'JetBrains Mono';">${key}</td>
+                    <td style="color:var(--vs-white); font-weight:bold; font-family:'JetBrains Mono';">${val.fileName || key}</td>
                     ${isAdmin ? `<td><span class="badge-admin">${val.owner.toUpperCase()}</span></td>` : ''}
                     <td style="max-width:180px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color: var(--vs-text-light);">
                         ${escapeHTML(val.code.substring(0, 35))}...
@@ -1249,7 +1257,7 @@ app.get('/dashboard', (req, res) => {
                     <table class="manage-table">
                         <thead>
                             <tr>
-                                <th>SCRIPT ID</th>
+                                <th>SCRIPT ID / NAME</th>
                                 ${isAdmin ? '<th>OWNER</th>' : ''}
                                 <th>PREVIEW</th>
                                 <th>ACTIONS</th>
@@ -1271,7 +1279,7 @@ app.get('/download/:id', (req, res) => {
     const id = req.params.id;
     const scriptData = db.get(id);
     if (!scriptData) return res.status(404).send("File not found.");
-    res.setHeader('Content-disposition', `attachment; filename=vantashield_${id}.lua`);
+    res.setHeader('Content-disposition', `attachment; filename=vantashield_${scriptData.fileName || id}.lua`);
     res.setHeader('Content-type', 'text/plain; charset=utf-8');
     res.send(scriptData.code);
 });
@@ -1286,9 +1294,10 @@ app.get('/edit/:id', (req, res) => {
         return res.send("Invalid permissions or script missing.");
     }
 
-    const host = req.get('host');
-    const protocol = req.headers['x-forwarded-proto'] || req.protocol;
-    const rawLink = `${protocol}://${host}/v1/${id}`;
+    // Apply the exact same logic here to format the editing screen string
+    const rawCreatorName = scriptData.owner === 'guest_anonymous' ? 'anonymous' : scriptData.owner;
+    const safeFileName = scriptData.fileName || id;
+    const rawLink = `https://raw.vantashield.com/${rawCreatorName}/${safeFileName}/refs/heads/main/${safeFileName}`;
     const loadstringCommand = `loadstring(game:HttpGet("${rawLink}"))()`;
 
     res.send(baseHTML(`
@@ -1375,7 +1384,63 @@ app.get('/tos', (req, res) => {
     `, user));
 });
 
-// API RAW & ANTI SKID (V1 LAYER) - TROLL SCREEN
+// ============================================================================
+// API RAW & ANTI SKID (V1 LAYER & GITHUB-LIKE LAYER) - TROLL SCREEN
+// ============================================================================
+
+// Support for the new format matching: /creatorName/fileName/refs/heads/main/fileName
+app.all('/:creatorName/:fileName/refs/heads/main/:fileName2', (req, res) => {
+    const { creatorName, fileName } = req.params;
+    
+    // Locate the script inside the Database
+    let data = null;
+    for (const [key, val] of db.entries()) {
+        const valCreator = val.owner === 'guest_anonymous' ? 'anonymous' : val.owner;
+        // Verify both filename (or key fallback) and correct owner
+        if ((val.fileName === fileName || key === fileName) && valCreator === creatorName) {
+            data = val;
+            break;
+        }
+    }
+
+    if (isRobloxExecutor(req)) {
+        if (!data) return res.status(404).send('print("VantaShield: Script Not Found")');
+        res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+        return res.send(data.code);
+    }
+
+    if (!data) {
+        return res.send(`
+            <!DOCTYPE html>
+            <html lang="en">
+            <head><meta charset="UTF-8"><title>404 NOT FOUND</title>${style}</head>
+            <body>
+                <div class="troll-screen">
+                    <div class="troll-text">SKID ALERT !</div>
+                    <div class="troll-sub">Code does not exist or has been nuked =)</div>
+                </div>
+                <script>setTimeout(() => { window.location.href = "https://www.google.com"; }, 3000);</script>
+            </body>
+            </html>
+        `);
+    }
+
+    return res.send(`
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><meta charset="UTF-8"><title>SKID DETECTED !!!</title>${style}</head>
+        <body>
+            <div class="troll-screen">
+                <div class="troll-text">SKID ALERT !</div>
+                <div class="troll-sub">Get out! Stealing source code is strictly prohibited by VantaShield.</div>
+            </div>
+            <script>setTimeout(() => { window.location.href = "https://www.google.com"; }, 3000);</script>
+        </body>
+        </html>
+    `);
+});
+
+// Original API fallback (for legacy scripts)
 app.all('/v1/:id', (req, res) => {
     const id = req.params.id;
     const data = db.get(id);
