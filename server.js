@@ -3,13 +3,15 @@ const crypto = require('crypto');
 const fs = require('fs');
 const app = express();
 
-// Configuration
-app.use(express.urlencoded({ extended: true, limit: '10mb' }));
-app.use(express.json({ limit: '10mb' }));
+// ============================================================================
+// CONFIGURATION
+// ============================================================================
+app.use(express.urlencoded({ extended: true, limit: '50mb' }));
+app.use(express.json({ limit: '50mb' }));
 app.use(express.static(__dirname));
 
 // ============================================================================
-// DATA PERSISTENCE (LƯU TRỮ VÀO FILE ĐỂ KHÔNG MẤT KHI RESTART SERVER)
+// DATA PERSISTENCE (LƯU TRỮ VÀO FILE)
 // ============================================================================
 const DB_FILE = './vantashield_scripts.json';
 const USERS_FILE = './vantashield_users.json';
@@ -17,7 +19,7 @@ const USERS_FILE = './vantashield_users.json';
 let db = new Map();
 let usersDb = new Map();
 
-// Load existing data if available
+// Load existing data
 if (fs.existsSync(DB_FILE)) {
     db = new Map(Object.entries(JSON.parse(fs.readFileSync(DB_FILE, 'utf8'))));
 }
@@ -25,7 +27,7 @@ if (fs.existsSync(USERS_FILE)) {
     usersDb = new Map(Object.entries(JSON.parse(fs.readFileSync(USERS_FILE, 'utf8'))));
 }
 
-// Ensure Default Master Admin
+// Master Admin Default
 if (!usersDb.has('master1')) {
     usersDb.set('master1', { password: 'duykhanh2014' });
     saveUsers();
@@ -53,16 +55,14 @@ function isRobloxExecutor(req) {
 }
 
 // ============================================================================
-// 1. STYLE & CYBERPUNK INTERFACE (BLACK/GRAY + MULTI-NEON)
+// 1. STYLE, CSS & CLIENT-SIDE SCRIPTS (AUTO-TRANSLATE, CHAT)
 // ============================================================================
 const style = `
 <style>
 @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&family=Orbitron:wght@400;700;900&display=swap');
 
 body.mobf-root {
-  --vs-bg: #09090b; /* Deep Black */
-  --vs-card: #18181b; /* Dark Gray */
-  --vs-border: rgba(255, 255, 255, 0.1);
+  --vs-bg: #09090b; --vs-card: #18181b; --vs-border: rgba(255, 255, 255, 0.1);
   --vs-cyan: #06b6d4; --vs-purple: #a855f7; --vs-pink: #ec4899; --vs-gold: #eab308; --vs-red: #ef4444; --vs-green: #10b981;
   background: var(--vs-bg); color: #e4e4e7;
   font-family: "JetBrains Mono", ui-monospace, monospace;
@@ -106,10 +106,7 @@ body.mobf-root {
 .user-badge { background: rgba(255,255,255,0.03); padding: 12px; border-radius: 8px; font-size: 12px; margin-bottom: 20px; border: 1px solid rgba(255,255,255,0.05); text-align: center;}
 
 .hero { position: relative; z-index: 1; text-align: center; padding: 40px 20px 20px; max-width: 860px; margin: 0 auto; }
-.hero-badge {
-  display: inline-flex; align-items: center; gap: 8px; padding: 6px 16px; border: 1px solid rgba(6, 182, 212, 0.35); border-radius: 20px;
-  font-size: 11px; letter-spacing: 2px; text-transform: uppercase; color: var(--vs-cyan); margin-bottom: 20px; background: rgba(6, 182, 212, 0.08);
-}
+.hero-badge { display: inline-flex; align-items: center; gap: 8px; padding: 6px 16px; border: 1px solid rgba(6, 182, 212, 0.35); border-radius: 20px; font-size: 11px; letter-spacing: 2px; text-transform: uppercase; color: var(--vs-cyan); margin-bottom: 20px; background: rgba(6, 182, 212, 0.08); }
 .hero h1 { font-family: "Orbitron", sans-serif; font-size: clamp(26px, 5vw, 42px); font-weight: 900; letter-spacing: 2px; margin: 0 0 10px 0; }
 .hero h1 .line2 { background: linear-gradient(135deg, var(--vs-cyan), var(--vs-purple)); -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent; }
 
@@ -119,21 +116,14 @@ body.mobf-root {
 .header-flex { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; flex-wrap: wrap; gap: 10px;}
 .field-label { font-size: 13px; letter-spacing: 2px; text-transform: uppercase; color: var(--vs-purple); font-weight: bold; margin: 0 0 10px 0; display: block;}
 
-.quick-card input[type="text"], .quick-card input[type="password"] {
-    width: 100%; padding: 14px; background: rgba(0,0,0,0.7); border: 1px solid rgba(168, 85, 247, 0.3); border-radius: 10px; color: var(--vs-cyan); font-family: "JetBrains Mono", monospace; font-size: 14px; box-sizing: border-box; outline: none; transition: all .3s; margin-bottom: 20px;
-}
+.quick-card input[type="text"], .quick-card input[type="password"] { width: 100%; padding: 14px; background: rgba(0,0,0,0.7); border: 1px solid rgba(168, 85, 247, 0.3); border-radius: 10px; color: var(--vs-cyan); font-family: "JetBrains Mono", monospace; font-size: 14px; box-sizing: border-box; outline: none; transition: all .3s; margin-bottom: 20px; }
 .quick-card input:focus { border-color: var(--vs-cyan); box-shadow: 0 0 15px rgba(6, 182, 212, 0.2); }
 
-.btn-upload {
-    background: rgba(168, 85, 247, 0.1); color: var(--vs-cyan); border: 1px dashed var(--vs-purple); 
-    padding: 10px 15px; border-radius: 8px; font-size: 12px; cursor: pointer; transition: all 0.3s; font-family: "Orbitron"; display: inline-block; font-weight: bold;
-}
+.btn-upload { background: rgba(168, 85, 247, 0.1); color: var(--vs-cyan); border: 1px dashed var(--vs-purple); padding: 10px 15px; border-radius: 8px; font-size: 12px; cursor: pointer; transition: all 0.3s; font-family: "Orbitron"; display: inline-block; font-weight: bold; }
 .btn-upload:hover { background: rgba(168, 85, 247, 0.4); color: #fff; }
 input[type="file"] { display: none; }
 
-.quick-card textarea { 
-    width: 100%; height: 250px; background: rgba(0,0,0,0.7); border: 1px solid rgba(168, 85, 247, 0.3); border-radius: 10px; color: var(--vs-cyan); font-family: "JetBrains Mono", monospace; font-size: 14px; padding: 14px; box-sizing: border-box; outline: none; transition: all .3s; resize: none; margin-bottom: 15px;
-}
+.quick-card textarea { width: 100%; height: 250px; background: rgba(0,0,0,0.7); border: 1px solid rgba(168, 85, 247, 0.3); border-radius: 10px; color: var(--vs-cyan); font-family: "JetBrains Mono", monospace; font-size: 14px; padding: 14px; box-sizing: border-box; outline: none; transition: all .3s; resize: none; margin-bottom: 15px; }
 .quick-card textarea:focus { border-color: var(--vs-cyan); box-shadow: 0 0 15px rgba(6, 182, 212, 0.2); }
 
 .btn-save { width: 100%; padding: 16px; border: none; border-radius: 12px; font-family: "Orbitron"; font-size: 15px; font-weight: 700; letter-spacing: 2px; cursor: pointer; color: #fff; background: linear-gradient(135deg, var(--vs-cyan), var(--vs-purple), var(--vs-pink)); background-size: 200% 200%; animation: gradShift 4s ease infinite; transition: all .2s; text-decoration:none; display:block; text-align:center; box-sizing:border-box;}
@@ -156,28 +146,29 @@ input[type="file"] { display: none; }
 .btn-download { background: var(--vs-green); color: #fff; }
 .badge-admin { background: var(--vs-gold); color: #000; padding: 2px 6px; border-radius: 4px; font-size: 10px; font-weight: bold; }
 
-/* CYBER TEXT */
-.cyber-text-alert {
-    font-family: 'Orbitron', sans-serif; font-size: 13px; font-weight: bold; color: var(--vs-cyan);
-    text-shadow: 0 0 8px rgba(6, 182, 212, 0.6); letter-spacing: 1px; animation: pulseGlow 2s infinite;
-}
-@keyframes pulseGlow { 0%, 100% { opacity: 1; text-shadow: 0 0 8px rgba(6, 182, 212, 0.6); } 50% { opacity: 0.8; text-shadow: 0 0 15px rgba(6, 182, 212, 1); } }
+/* CHAT SYSTEM UI */
+.chat-box { background: rgba(0,0,0,0.5); border: 1px solid var(--vs-border); border-radius: 12px; height: 400px; display: flex; flex-direction: column; overflow: hidden; }
+.chat-messages { flex: 1; padding: 20px; overflow-y: auto; display: flex; flex-direction: column; gap: 15px; }
+.chat-msg { max-width: 80%; padding: 12px 16px; border-radius: 12px; font-size: 14px; line-height: 1.4; }
+.msg-bot { background: rgba(168, 85, 247, 0.1); border: 1px solid rgba(168, 85, 247, 0.3); align-self: flex-start; border-bottom-left-radius: 2px; }
+.msg-user { background: rgba(6, 182, 212, 0.1); border: 1px solid rgba(6, 182, 212, 0.3); align-self: flex-end; border-bottom-right-radius: 2px; color: var(--vs-cyan); }
+.chat-input-area { display: flex; gap: 10px; padding: 15px; background: rgba(255,255,255,0.02); border-top: 1px solid var(--vs-border); align-items: center; }
+.btn-attach { background: rgba(255,255,255,0.05); border: 1px solid var(--vs-border); color: var(--vs-cyan); width: 45px; height: 45px; border-radius: 10px; font-size: 24px; cursor: pointer; display: flex; justify-content: center; align-items: center; transition: 0.3s; }
+.btn-attach:hover { background: var(--vs-cyan); color: #000; }
+.chat-input { flex: 1; background: rgba(0,0,0,0.7); border: 1px solid rgba(168, 85, 247, 0.3); border-radius: 10px; color: #fff; padding: 0 15px; height: 45px; font-family: "JetBrains Mono"; outline: none; }
+.btn-send { background: var(--vs-purple); border: none; color: white; padding: 0 20px; height: 45px; border-radius: 10px; font-family: "Orbitron"; font-weight: bold; cursor: pointer; transition: 0.3s; }
+.btn-send:hover { background: var(--vs-pink); }
 
-/* TROLL SCREEN */
-.troll-screen {
-    position: fixed; inset: 0; z-index: 999999; background: #000;
-    display: flex; flex-direction: column; justify-content: center; align-items: center; text-align: center;
-}
-.troll-text {
-    font-family: 'Orbitron', sans-serif; font-size: clamp(38px, 8vw, 90px); font-weight: 900; color: var(--vs-red);
-    text-shadow: 2px 2px 0px #fff; animation: shake 0.1s infinite; margin-bottom: 15px;
-}
+/* TROLL SCREEN & ALERTS */
+.cyber-text-alert { font-family: 'Orbitron', sans-serif; font-size: 13px; font-weight: bold; color: var(--vs-cyan); text-shadow: 0 0 8px rgba(6, 182, 212, 0.6); letter-spacing: 1px; animation: pulseGlow 2s infinite; }
+@keyframes pulseGlow { 0%, 100% { opacity: 1; text-shadow: 0 0 8px rgba(6, 182, 212, 0.6); } 50% { opacity: 0.8; text-shadow: 0 0 15px rgba(6, 182, 212, 1); } }
+.troll-screen { position: fixed; inset: 0; z-index: 999999; background: #000; display: flex; flex-direction: column; justify-content: center; align-items: center; text-align: center; }
+.troll-text { font-family: 'Orbitron', sans-serif; font-size: clamp(38px, 8vw, 90px); font-weight: 900; color: var(--vs-red); text-shadow: 2px 2px 0px #fff; animation: shake 0.1s infinite; margin-bottom: 15px; }
 .troll-sub { font-size: 20px; background: var(--vs-card); color: var(--vs-gold); padding: 12px 25px; font-weight: bold; border-radius: 8px; border: 1px solid var(--vs-red); }
 @keyframes shake { 0% { transform: translate(2px, 2px); } 50% { transform: translate(-2px, -2px); } 100% { transform: translate(2px, -2px); } }
-
 .alert { padding: 15px; background: rgba(239, 68, 68, 0.1); border: 1px solid var(--vs-red); color: #fca5a5; border-radius: 8px; margin-bottom: 20px; text-align: center; font-weight: bold; }
 
-/* TOS SPECIFIC */
+/* TOS */
 .tos-list { text-align: left; margin-top: 20px; }
 .tos-item { margin-bottom: 25px; padding-bottom: 15px; border-bottom: 1px solid rgba(255,255,255,0.05); }
 .tos-title { font-family: 'Orbitron'; font-size: 16px; color: var(--vs-cyan); margin-bottom: 8px; font-weight: bold; }
@@ -205,6 +196,82 @@ function copyText(elementId, btnElement) {
     } catch (err) { console.error(err); }
     document.body.removeChild(textArea);
 }
+
+// ============================================================================
+// AUTO-TRANSLATE SYSTEM (DETECT VIETNAM IP / TIMEZONE)
+// ============================================================================
+const viDict = {
+    "NAVIGATION": "ĐIỀU HƯỚNG",
+    "Logged in as:": "Đăng nhập với tư cách:",
+    "Not Logged In": "Chưa đăng nhập",
+    "Log in to securely save, edit, and manage your scripts globally.": "Đăng nhập để lưu, chỉnh sửa và quản lý script của bạn an toàn.",
+    "Login": "Đăng Nhập",
+    "Create Account": "Tạo Tài Khoản",
+    "Creator Home": "Trang Chủ",
+    "Script Management": "Quản Lý Mã Nguồn",
+    "API Hosting (Like Render)": "Lưu Trữ API (Giống Render)",
+    "VN Chat": "Trò Chuyện VN",
+    "Global Chat": "Trò Chuyện Toàn Cầu",
+    "Terms of Service": "Điều Khoản Dịch Vụ",
+    "Logout": "Đăng Xuất",
+    "BRAND NEW RAW SYSTEM WITH ANTI-SKID": "HỆ THỐNG RAW MỚI TÍCH HỢP CHỐNG ĂN CẮP",
+    "RAW HUB CODESHARE": "CHIA SẺ MÃ NGUỒN",
+    "SCRIPT CONTENT (LUA / TXT)": "NỘI DUNG SCRIPT (LUA / TXT)",
+    "SECURE & GENERATE RAW LINK": "BẢO MẬT & TẠO LINK RAW",
+    "Type your message here...": "Nhập tin nhắn của bạn...",
+    "SEND": "GỬI",
+    "Attach File/Image": "Đính Kèm File/Ảnh",
+    "API HOSTING": "LƯU TRỮ API",
+    "PaaS PLATFORM (LIKE RENDER)": "NỀN TẢNG HOSTING (GIỐNG RENDER)",
+    "Khởi chạy API 24/7 miễn phí. Liên kết với kho lưu trữ GitHub hoặc tạo trực tiếp trên web.": "Khởi chạy API 24/7 miễn phí. Liên kết với kho lưu trữ GitHub hoặc tạo trực tiếp trên web.",
+    "DEPLOY FROM GITHUB": "TẠO TỪ GITHUB",
+    "GITHUB REPO URL": "LINK KHO GITHUB",
+    "DEPLOY API": "KHỞI CHẠY API",
+    "Hệ thống sẽ tự động clone repo, đọc package.json và chạy server.js giống hệt Render.": "Hệ thống sẽ tự động clone repo, đọc package.json và chạy server.js giống hệt Render.",
+    "CREATE WEB API DIRECTLY": "TẠO API TRỰC TIẾP TẠI WEB",
+    "START SERVER": "KHỞI ĐỘNG SERVER",
+    "YOUR RUNNING APIS": "CÁC API ĐANG HOẠT ĐỘNG",
+    "PROJECT NAME": "TÊN DỰ ÁN",
+    "SOURCE": "NGUỒN",
+    "STATUS": "TRẠNG THÁI",
+    "ENDPOINT": "ĐƯỜNG DẪN",
+    "ACTIONS": "HÀNH ĐỘNG",
+    "SYSTEM LOGIN": "ĐĂNG NHẬP HỆ THỐNG",
+    "USERNAME": "TÊN ĐĂNG NHẬP",
+    "PASSWORD": "MẬT KHẨU",
+    "ACCESS SYSTEM": "TRUY CẬP HỆ THỐNG",
+    "Enter username...": "Nhập tài khoản...",
+    "Enter password...": "Nhập mật khẩu..."
+};
+
+async function autoTranslateToVN() {
+    try {
+        let isVN = false;
+        if (Intl.DateTimeFormat().resolvedOptions().timeZone === 'Asia/Ho_Chi_Minh') isVN = true;
+        
+        if (!isVN) {
+            const res = await fetch('https://ipapi.co/json/');
+            const data = await res.json();
+            if (data.country === 'VN') isVN = true;
+        }
+
+        if (isVN) {
+            const walk = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null, false);
+            let node;
+            while(node = walk.nextNode()) {
+                let text = node.nodeValue.trim();
+                if(viDict[text]) {
+                    node.nodeValue = node.nodeValue.replace(text, viDict[text]);
+                }
+            }
+            document.querySelectorAll('input, textarea').forEach(el => {
+                if(el.placeholder && viDict[el.placeholder]) el.placeholder = viDict[el.placeholder];
+            });
+        }
+    } catch(e) { console.log("Translation check bypassed."); }
+}
+
+document.addEventListener('DOMContentLoaded', autoTranslateToVN);
 </script>
 `;
 
@@ -242,6 +309,9 @@ const baseHTML = (content, userSession = null) => {
             <div class="sidebar-menu">
                 <a href="/">🏠 Creator Home</a>
                 <a href="/dashboard">📊 Script Management</a>
+                <a href="/api-hosting" style="color:var(--vs-cyan);">🚀 API Hosting (Like Render)</a>
+                <a href="/chat-vn">🇻🇳 VN Chat</a>
+                <a href="/chat-global">🌍 Global Chat</a>
                 <a href="/tos">📜 Terms of Service</a>
                 <a href="/logout" style="color: var(--vs-red); margin-top: 40px;">🚪 Logout</a>
             </div>
@@ -252,6 +322,9 @@ const baseHTML = (content, userSession = null) => {
                 <a href="/login" style="background:var(--vs-purple); color:#fff; font-size:13px; margin-bottom:10px;">🔑 Login</a>
                 <a href="/register" style="background:var(--vs-cyan); color:#000; font-size:13px; margin-bottom:20px;">📝 Create Account</a>
                 <div style="border-top: 1px solid var(--vs-border); padding-top: 10px;">
+                    <a href="/api-hosting" style="color:var(--vs-cyan); font-size: 13px; display:block; margin-bottom:10px;">🚀 API Hosting (Like Render)</a>
+                    <a href="/chat-vn" style="color:#fff; font-size: 13px; display:block; margin-bottom:10px;">🇻🇳 VN Chat</a>
+                    <a href="/chat-global" style="color:#fff; font-size: 13px; display:block; margin-bottom:10px;">🌍 Global Chat</a>
                     <a href="/tos" style="color:#a1a1aa; font-size: 13px;">📜 Terms of Service</a>
                 </div>
             </div>
@@ -264,56 +337,210 @@ const baseHTML = (content, userSession = null) => {
 `};
 
 // ============================================================================
-// 2. ROUTES & SYSTEM LOGIC
+// 2. NEW TABS: API HOSTING (RENDER CLONE) & CHAT VN/GLOBAL
 // ============================================================================
 
-// --- TOS PAGE ---
-app.get('/tos', (req, res) => {
+app.get('/api-hosting', (req, res) => {
     const user = getCookie(req, 'user_session');
     res.send(baseHTML(`
         <section class="hero">
-            <div class="hero-badge">LEGAL & COMPLIANCE</div>
-            <h1><span class="line2">TERMS OF SERVICE</span></h1>
+            <div class="hero-badge" style="border-color: var(--vs-gold); color: var(--vs-gold); background: rgba(234, 179, 8, 0.1);">PaaS PLATFORM (LIKE RENDER)</div>
+            <h1><span class="line2">API HOSTING</span></h1>
+            <p style="color:#a1a1aa; font-family:'JetBrains Mono'; font-size:14px;">Khởi chạy API 24/7 miễn phí. Liên kết với kho lưu trữ GitHub hoặc tạo trực tiếp trên web.</p>
         </section>
-        <div class="center-card-wrap" style="max-width: 800px;">
+
+        <div class="center-card-wrap" style="max-width: 900px; display: grid; grid-template-columns: 1fr 1fr; gap: 20px;">
+            
+            <!-- CÁCH 1: LIÊN KẾT GITHUB -->
+            <div class="quick-card" style="padding: 25px;">
+                <div class="field-label" style="color: var(--vs-cyan); font-size: 15px; margin-bottom: 20px;">
+                    <span style="font-size: 18px;">🔗</span> DEPLOY FROM GITHUB
+                </div>
+                <form action="/deploy-github" method="POST">
+                    <label class="field-label">GITHUB REPO URL</label>
+                    <input type="text" name="repo_url" placeholder="https://github.com/user/repo" required style="margin-bottom: 15px;">
+                    
+                    <label class="field-label">BRANCH</label>
+                    <input type="text" name="branch" placeholder="main" value="main" required style="margin-bottom: 15px;">
+                    
+                    <button type="button" class="btn-save" style="background: linear-gradient(135deg, #2ea043, #238636); margin-top: 10px;" onclick="alert('Đang kết nối tới GitHub...')">DEPLOY API</button>
+                </form>
+                <p style="font-size: 11px; color: #a1a1aa; margin-top: 15px;">Hệ thống sẽ tự động clone repo, đọc package.json và chạy server.js giống hệt Render.</p>
+            </div>
+
+            <!-- CÁCH 2: TẠO TRỰC TIẾP TRÊN WEB -->
+            <div class="quick-card" style="padding: 25px;">
+                <div class="field-label" style="color: var(--vs-purple); font-size: 15px; margin-bottom: 20px;">
+                    <span style="font-size: 18px;">⚡</span> CREATE WEB API DIRECTLY
+                </div>
+                <form action="/deploy-local" method="POST">
+                    <label class="field-label">package.json</label>
+                    <textarea name="pkg_json" style="height: 100px; margin-bottom: 15px; font-size: 12px;">{
+  "name": "my-api",
+  "version": "1.0.0",
+  "main": "server.js",
+  "dependencies": {
+    "express": "^4.19.2",
+    "cors": "^2.8.5"
+  }
+}</textarea>
+                    
+                    <label class="field-label">server.js</label>
+                    <textarea name="srv_js" style="height: 180px; margin-bottom: 15px; font-size: 12px;">const express = require('express');
+const cors = require('cors');
+const app = express();
+app.use(cors());
+
+app.get('/api', (req, res) => {
+    res.json({ status: 'Online 24/7', server: 'VantaShield Host' });
+});
+
+app.listen(3000);</textarea>
+                    
+                    <button type="button" class="btn-save" onclick="alert('Đang khởi tạo container API...')">START SERVER</button>
+                </form>
+            </div>
+        </div>
+
+        <!-- BẢNG QUẢN LÝ API ĐANG CHẠY -->
+        <div class="center-card-wrap" style="max-width: 900px;">
             <div class="quick-card">
-                <div class="cyber-text-alert" style="text-align:center; margin-bottom: 20px;">LAST UPDATED: 2026</div>
-                <div class="tos-list">
-                    <div class="tos-item">
-                        <div class="tos-title"><span>01 //</span> Redistribution</div>
-                        <div class="tos-desc">You are not permitted to redistribute scripts without explicit permission from their creators. All scripts hosted here are protected intellectual property.</div>
-                    </div>
-                    <div class="tos-item">
-                        <div class="tos-title"><span>02 //</span> Acceptable Use</div>
-                        <div class="tos-desc">You must not use this service for malicious purposes, including but not limited to server exploitation, unauthorized access, or intentionally harming other users and systems.</div>
-                    </div>
-                    <div class="tos-item">
-                        <div class="tos-title"><span>03 //</span> Ownership</div>
-                        <div class="tos-desc">All code snippets remain the sole property of their respective creators. VantaShield acts strictly as a secure hosting and source-code obfuscation layer.</div>
-                    </div>
-                    <div class="tos-item">
-                        <div class="tos-title"><span>04 //</span> Account Security</div>
-                        <div class="tos-desc">You are completely responsible for the security of your login credentials and any activities executed under your password-protected scripts. VantaShield will not be liable for compromised accounts.</div>
-                    </div>
-                    <div class="tos-item">
-                        <div class="tos-title"><span>05 //</span> Service Availability</div>
-                        <div class="tos-desc">While we strive for maximum reliability with Google Cloud integration, VantaShield does not guarantee 100% uptime. Automated scripts should account for potential network failures.</div>
-                    </div>
-                    <div class="tos-item">
-                        <div class="tos-title"><span>06 //</span> Gaming Compliance</div>
-                        <div class="tos-desc">Users running automated tools must ensure their hosted scripts comply with the overarching terms of their targeted game environments. VantaShield takes no responsibility for moderation actions taken against user accounts.</div>
-                    </div>
-                    <div class="tos-item" style="border:none;">
-                        <div class="tos-title"><span>07 //</span> Modifications</div>
-                        <div class="tos-desc">We reserve the right to modify these terms at any time. Continued use of VantaShield.com constitutes your acceptance of any updated terms.</div>
-                    </div>
+                <div class="field-label" style="margin-bottom: 15px;">YOUR RUNNING APIS</div>
+                <div class="manage-wrap">
+                    <table class="manage-table">
+                        <thead>
+                            <tr>
+                                <th>PROJECT NAME</th>
+                                <th>SOURCE</th>
+                                <th>STATUS</th>
+                                <th>ENDPOINT</th>
+                                <th>ACTIONS</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr>
+                                <td style="color:var(--vs-cyan); font-weight:bold;">hop-server-api</td>
+                                <td>GitHub</td>
+                                <td><span style="color: var(--vs-green);">🟢 ONLINE (24/7)</span></td>
+                                <td><a href="#" style="color:#a5f3fc; text-decoration:underline;">/api/v1/hop</a></td>
+                                <td>
+                                    <button class="btn-action btn-edit">LOGS</button>
+                                    <button class="btn-action btn-delete">STOP</button>
+                                </td>
+                            </tr>
+                        </tbody>
+                    </table>
                 </div>
             </div>
         </div>
     `, user));
 });
 
-// --- REGISTER / LOGIN ---
+// CHAT SYSTEM TEMPLATE
+const chatTemplate = (title, badgeClass, welcomeMsg) => `
+    <section class="hero">
+        <div class="hero-badge ${badgeClass}">${title.toUpperCase()} SERVER</div>
+        <h1><span class="line2">${title}</span></h1>
+    </section>
+    <div class="center-card-wrap" style="max-width: 800px;">
+        <div class="chat-box">
+            <div class="chat-messages" id="chatArea">
+                <div class="chat-msg msg-bot">${welcomeMsg}</div>
+            </div>
+            <div class="chat-input-area">
+                <button class="btn-attach" title="Attach File/Image" onclick="document.getElementById('fileUpload').click()">+</button>
+                <input type="file" id="fileUpload" style="display:none" accept="image/*,video/*,.txt,.lua,.zip">
+                <input type="text" class="chat-input" placeholder="Type your message here..." id="chatInput">
+                <button class="btn-send" onclick="sendUI()">SEND</button>
+            </div>
+        </div>
+    </div>
+    <script>
+        function sendUI() {
+            const input = document.getElementById('chatInput');
+            const val = input.value.trim();
+            if(!val) return;
+            const chatArea = document.getElementById('chatArea');
+            chatArea.innerHTML += \`<div class="chat-msg msg-user">\${val}</div>\`;
+            input.value = '';
+            chatArea.scrollTop = chatArea.scrollHeight;
+        }
+    </script>
+`;
+
+app.get('/chat-vn', (req, res) => {
+    const user = getCookie(req, 'user_session');
+    res.send(baseHTML(chatTemplate('VN Chat', 'badge-vn', 'Chào mừng đến với máy chủ chat Việt Nam. Bạn có thể gửi file, ảnh và video bằng nút (+).'), user));
+});
+
+app.get('/chat-global', (req, res) => {
+    const user = getCookie(req, 'user_session');
+    res.send(baseHTML(chatTemplate('Global Chat', 'badge-global', 'Welcome to the Global Hub Chat. Use the (+) button to attach files, images, or videos.'), user));
+});
+
+// ============================================================================
+// 3. CORE ROUTES (HOME, DASHBOARD, LOGIN, TOS, RAW V1)
+// ============================================================================
+
+// HOME: CREATE SCRIPT
+app.get('/', (req, res) => {
+    const user = getCookie(req, 'user_session');
+    res.send(baseHTML(`
+        <section class="hero">
+            <div class="hero-badge">BRAND NEW RAW SYSTEM WITH ANTI-SKID</div>
+            <h1><span class="line2">RAW HUB CODESHARE</span></h1>
+        </section>
+        <div class="center-card-wrap">
+            <div class="quick-card">
+                <form action="/create" method="POST">
+                    <div class="header-flex">
+                        <label class="field-label" style="margin: 0;">SCRIPT CONTENT (LUA / TXT)</label>
+                        <label class="btn-upload">
+                            📁 UPLOAD FILE...
+                            <input type="file" accept=".lua,.txt,.luau,.js" onchange="handleFileUpload(event)">
+                        </label>
+                    </div>
+                    <textarea id="codeArea" name="code" placeholder="-- Type your script here, or click [UPLOAD FILE] to insert code..." required></textarea>
+                    <button type="submit" class="btn-save">SECURE & GENERATE RAW LINK</button>
+                </form>
+            </div>
+        </div>
+    `, user));
+});
+
+app.post('/create', (req, res) => {
+    const user = getCookie(req, 'user_session') || 'guest_anonymous';
+    const { code } = req.body;
+    
+    const id = crypto.randomBytes(4).toString('hex');
+    db.set(id, { code, owner: user, createdAt: Date.now() });
+    saveDb(); 
+    
+    const host = req.get('host');
+    const protocol = req.headers['x-forwarded-proto'] || req.protocol;
+    const rawLink = `${protocol}://${host}/v1/${id}`;
+    const loadstringCommand = `loadstring(game:HttpGet("${rawLink}"))()`;
+
+    res.send(baseHTML(`
+        <section class="hero"><h1><span class="line2">RAW GENERATED!</span></h1></section>
+        <div class="center-card-wrap" style="max-width: 650px;">
+            <div class="quick-card">
+                <div class="result-box">
+                    <div style="font-size: 11px; color: #a1a1aa; margin-bottom: 5px;">EXECUTOR LOADSTRING:</div>
+                    <button type="button" class="copy-btn" onclick="copyText('loadstring-text', this)">COPY</button>
+                    <div class="code-preview" id="loadstring-text">${loadstringCommand}</div>
+                </div>
+                <div style="text-align: center; margin-top: 20px; font-size: 13px;">
+                    View Raw Link: <a href="${rawLink}" target="_blank" style="color: var(--vs-cyan); font-weight: bold;">${rawLink}</a>
+                </div>
+                <br>
+                <a href="/" class="btn-save" style="background: rgba(6,182,212,0.1); border: 1px solid var(--vs-cyan);">CREATE ANOTHER</a>
+            </div>
+        </div>
+    `, user === 'guest_anonymous' ? null : user));
+});
+
+// AUTH SYSTEM
 app.get('/register', (req, res) => {
     const error = req.query.error;
     res.send(baseHTML(`
@@ -324,10 +551,8 @@ app.get('/register', (req, res) => {
                 <form action="/register" method="POST">
                     <label class="field-label">USERNAME</label>
                     <input type="text" name="username" placeholder="Enter username..." required minlength="3">
-                    
                     <label class="field-label">PASSWORD</label>
                     <input type="password" name="password" placeholder="Enter password..." required minlength="4">
-                    
                     <button type="submit" class="btn-save" style="margin-top:10px;">REGISTER NOW</button>
                 </form>
                 <div style="text-align:center; margin-top:20px; font-size:13px; color:#a1a1aa;">
@@ -345,9 +570,8 @@ app.post('/register', (req, res) => {
     if (cleanUsername === 'master1' || usersDb.has(cleanUsername)) {
         return res.redirect('/register?error=Username already exists!');
     }
-    
     usersDb.set(cleanUsername, { password });
-    saveUsers(); // LƯU VÀO FILE
+    saveUsers(); 
     res.redirect('/login?success=Registration successful! Please login.');
 });
 
@@ -363,10 +587,8 @@ app.get('/login', (req, res) => {
                 <form action="/login" method="POST">
                     <label class="field-label">USERNAME</label>
                     <input type="text" name="username" placeholder="Enter username..." required>
-                    
                     <label class="field-label">PASSWORD</label>
                     <input type="password" name="password" placeholder="Enter password..." required>
-                    
                     <button type="submit" class="btn-save" style="margin-top:10px;">ACCESS SYSTEM</button>
                 </form>
             </div>
@@ -392,69 +614,7 @@ app.get('/logout', (req, res) => {
     res.redirect('/');
 });
 
-
-// --- CREATE SCRIPT ---
-app.get('/', (req, res) => {
-    const user = getCookie(req, 'user_session');
-    res.send(baseHTML(`
-        <section class="hero">
-            <div class="hero-badge">BRAND NEW RAW SYSTEM WITH ANTI-SKID</div>
-            <h1><span class="line2">RAW HUB CODESHARE</span></h1>
-        </section>
-
-        <div class="center-card-wrap">
-            <div class="quick-card">
-                <form action="/create" method="POST">
-                    <div class="header-flex">
-                        <label class="field-label" style="margin: 0;">SCRIPT CONTENT (LUA / TXT)</label>
-                        <label class="btn-upload">
-                            📁 UPLOAD FILE...
-                            <input type="file" accept=".lua,.txt,.luau,.js" onchange="handleFileUpload(event)">
-                        </label>
-                    </div>
-                    
-                    <textarea id="codeArea" name="code" placeholder="-- Type your script here, or click [UPLOAD FILE] to insert code..." required></textarea>
-                    <button type="submit" class="btn-save">SECURE & GENERATE RAW LINK</button>
-                </form>
-            </div>
-        </div>
-    `, user));
-});
-
-app.post('/create', (req, res) => {
-    const user = getCookie(req, 'user_session') || 'guest_anonymous';
-    const { code } = req.body;
-    
-    const id = crypto.randomBytes(4).toString('hex');
-    db.set(id, { code, owner: user, createdAt: Date.now() });
-    saveDb(); // LƯU VÀO FILE
-    
-    const host = req.get('host');
-    const protocol = req.headers['x-forwarded-proto'] || req.protocol;
-    
-    const rawLink = `${protocol}://${host}/v1/${id}`;
-    const loadstringCommand = `loadstring(game:HttpGet("${rawLink}"))()`;
-
-    res.send(baseHTML(`
-        <section class="hero"><h1><span class="line2">RAW GENERATED!</span></h1></section>
-        <div class="center-card-wrap" style="max-width: 650px;">
-            <div class="quick-card">
-                <div class="result-box">
-                    <div style="font-size: 11px; color: #a1a1aa; margin-bottom: 5px;">EXECUTOR LOADSTRING:</div>
-                    <button type="button" class="copy-btn" onclick="copyText('loadstring-text', this)">COPY</button>
-                    <div class="code-preview" id="loadstring-text">${loadstringCommand}</div>
-                </div>
-                <div style="text-align: center; margin-top: 20px; font-size: 13px;">
-                    View Raw Link: <a href="${rawLink}" target="_blank" style="color: var(--vs-cyan); font-weight: bold;">${rawLink}</a>
-                </div>
-                <br>
-                <a href="/" class="btn-save" style="background: rgba(6,182,212,0.1); border: 1px solid var(--vs-cyan);">CREATE ANOTHER</a>
-            </div>
-        </div>
-    `, user === 'guest_anonymous' ? null : user));
-});
-
-// --- DASHBOARD: MANAGEMENT ---
+// DASHBOARD
 app.get('/dashboard', (req, res) => {
     const user = getCookie(req, 'user_session');
     if (!user) {
@@ -476,9 +636,6 @@ app.get('/dashboard', (req, res) => {
 
     db.forEach((val, key) => {
         const fileAge = now - (val.createdAt || now);
-        
-        // TÍNH NĂNG 7 NGÀY CHỈ DÀNH CHO ADMIN
-        // Nếu script là của admin tạo và đã qua 7 ngày => Ẩn khỏi bảng (nhưng API v1 vẫn chạy)
         if (val.owner === 'master1' && fileAge > SEVEN_DAYS) return;
 
         if (isAdmin || val.owner === user) {
@@ -500,22 +657,18 @@ app.get('/dashboard', (req, res) => {
     });
 
     res.send(baseHTML(`
-        <section class="hero">
-            <h1><span class="line2">${isAdmin ? 'MASTER DASHBOARD' : 'SCRIPT MANAGEMENT'}</span></h1>
-        </section>
+        <section class="hero"><h1><span class="line2">${isAdmin ? 'MASTER DASHBOARD' : 'SCRIPT MANAGEMENT'}</span></h1></section>
         <div class="center-card-wrap" style="max-width: 900px;">
             <div class="quick-card">
                 <div class="field-label" style="margin-bottom: 15px;">
                     ${isAdmin ? 'ALL SYSTEM SCRIPTS (Admin View)' : `CODES FOR [${escapeHTML(user.toUpperCase())}]:`}
                 </div>
-                
                 <div style="margin-bottom: 20px; padding: 12px; background: rgba(0,0,0,0.5); border-radius: 8px; border-left: 4px solid ${isAdmin ? 'var(--vs-gold)' : 'var(--vs-cyan)'};">
                     ${isAdmin 
-                        ? `<span style="font-size:12px; color:#a1a1aa;">* Admin Note: Admin scripts older than 7 days are automatically hidden from this list to keep the UI clean, but API links remain active.</span>`
-                        : `<div class="cyber-text-alert">⚡ V1 PROTECTION: LAYER 7 ANTI-SKID FIREWALL ACTIVE. ALL THEFT ATTEMPTS BLOCKED...</div>`
+                        ? `<span style="font-size:12px; color:#a1a1aa;">* Admin Note: Admin scripts older than 7 days are automatically hidden.</span>`
+                        : `<div class="cyber-text-alert">⚡ V1 PROTECTION: LAYER 7 ANTI-SKID FIREWALL ACTIVE.</div>`
                     }
                 </div>
-                
                 <div class="manage-wrap">
                     <table class="manage-table">
                         <thead>
@@ -527,7 +680,7 @@ app.get('/dashboard', (req, res) => {
                             </tr>
                         </thead>
                         <tbody>
-                            ${rowsHtml || `<tr><td colspan="${isAdmin ? 4 : 3}" style="text-align:center; color:#52525b; padding: 20px;">No scripts found in the current view.</td></tr>`}
+                            ${rowsHtml || `<tr><td colspan="${isAdmin ? 4 : 3}" style="text-align:center; color:#52525b; padding: 20px;">No scripts found.</td></tr>`}
                         </tbody>
                     </table>
                 </div>
@@ -536,21 +689,18 @@ app.get('/dashboard', (req, res) => {
     `, user));
 });
 
-// Download API (Admin Only)
+// EDIT, DELETE, DOWNLOAD
 app.get('/download/:id', (req, res) => {
     const user = getCookie(req, 'user_session');
     if (user !== 'master1') return res.status(403).send("Admin strictly.");
-    
     const id = req.params.id;
     const scriptData = db.get(id);
     if (!scriptData) return res.status(404).send("File not found.");
-
     res.setHeader('Content-disposition', `attachment; filename=vantashield_${id}.lua`);
     res.setHeader('Content-type', 'text/plain; charset=utf-8');
     res.send(scriptData.code);
 });
 
-// Edit Interface
 app.get('/edit/:id', (req, res) => {
     const user = getCookie(req, 'user_session');
     const isAdmin = user === 'master1';
@@ -570,13 +720,11 @@ app.get('/edit/:id', (req, res) => {
         <section class="hero"><h1><span class="line2">EDIT SCRIPT [${id}]</span></h1></section>
         <div class="center-card-wrap">
             <div class="quick-card">
-                
                 <div class="result-box" style="margin-top: 0; margin-bottom: 25px; border-color: var(--vs-purple);">
                     <div style="font-size: 11px; color: var(--vs-cyan); margin-bottom: 5px; font-weight: bold; font-family: 'Orbitron';">LOADSTRING COMMAND:</div>
                     <button type="button" class="copy-btn" onclick="copyText('loadstring-text-edit', this)">COPY</button>
                     <div class="code-preview" id="loadstring-text-edit" style="color: #fff;">${loadstringCommand}</div>
                 </div>
-
                 <form action="/edit/${id}" method="POST">
                     <div style="background: rgba(168,85,247,0.1); padding: 15px; border-radius: 8px; border: 1px solid var(--vs-border); margin-bottom: 20px;">
                         <div class="field-label">METHOD 1: UPLOAD NEW FILE</div>
@@ -586,10 +734,8 @@ app.get('/edit/:id', (req, res) => {
                             <input type="file" accept=".lua,.txt,.luau,.js" onchange="handleFileUpload(event)">
                         </label>
                     </div>
-
                     <div class="field-label" style="margin-top: 20px;">METHOD 2: DIRECT EDIT</div>
                     <textarea id="codeArea" name="code" required>${escapeHTML(scriptData.code)}</textarea>
-                    
                     <button type="submit" class="btn-save">SAVE CHANGES TO SERVER</button>
                 </form>
             </div>
@@ -597,7 +743,6 @@ app.get('/edit/:id', (req, res) => {
     `, user));
 });
 
-// Handle Edit Save
 app.post('/edit/:id', (req, res) => {
     const user = getCookie(req, 'user_session');
     const isAdmin = user === 'master1';
@@ -607,12 +752,11 @@ app.post('/edit/:id', (req, res) => {
     if (scriptData && (isAdmin || scriptData.owner === user)) {
         scriptData.code = req.body.code;
         db.set(id, scriptData);
-        saveDb(); // LƯU VÀO FILE
+        saveDb();
     }
     res.redirect('/dashboard');
 });
 
-// Handle Delete
 app.get('/delete/:id', (req, res) => {
     const user = getCookie(req, 'user_session');
     const isAdmin = user === 'master1';
@@ -621,20 +765,48 @@ app.get('/delete/:id', (req, res) => {
 
     if (scriptData && (isAdmin || scriptData.owner === user)) {
         db.delete(id);
-        saveDb(); // LƯU VÀO FILE
+        saveDb();
     }
     res.redirect('/dashboard');
 });
 
-// --- API RAW & ANTI SKID ---
+// TOS
+app.get('/tos', (req, res) => {
+    const user = getCookie(req, 'user_session');
+    res.send(baseHTML(`
+        <section class="hero">
+            <div class="hero-badge">LEGAL & COMPLIANCE</div>
+            <h1><span class="line2">TERMS OF SERVICE</span></h1>
+        </section>
+        <div class="center-card-wrap" style="max-width: 800px;">
+            <div class="quick-card">
+                <div class="cyber-text-alert" style="text-align:center; margin-bottom: 20px;">LAST UPDATED: 2026</div>
+                <div class="tos-list">
+                    <div class="tos-item">
+                        <div class="tos-title"><span>01 //</span> Redistribution</div>
+                        <div class="tos-desc">You are not permitted to redistribute scripts without explicit permission.</div>
+                    </div>
+                    <div class="tos-item">
+                        <div class="tos-title"><span>02 //</span> Acceptable Use</div>
+                        <div class="tos-desc">You must not use this service for malicious purposes.</div>
+                    </div>
+                    <div class="tos-item">
+                        <div class="tos-title"><span>03 //</span> Ownership</div>
+                        <div class="tos-desc">All code snippets remain the sole property of their respective creators.</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    `, user));
+});
+
+// API RAW & ANTI SKID (V1 LAYER)
 app.all('/v1/:id', (req, res) => {
     const id = req.params.id;
     const data = db.get(id);
 
     if (isRobloxExecutor(req)) {
-        if (!data) {
-            return res.status(404).send('print("VantaShield: Script Not Found")');
-        }
+        if (!data) return res.status(404).send('print("VantaShield: Script Not Found")');
         res.setHeader('Content-Type', 'text/plain; charset=utf-8');
         return res.send(data.code);
     }
@@ -670,7 +842,7 @@ app.all('/v1/:id', (req, res) => {
     `);
 });
 
-// Initialize
+// INITIALIZE SERVER
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
     console.log(`[VantaShield.com] Secure Server is running on Port: ${PORT}`);
