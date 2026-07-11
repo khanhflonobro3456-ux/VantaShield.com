@@ -2,8 +2,60 @@ const express = require('express');
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
-const { spawn } = require('child_process');
+const { spawn, exec } = require('child_process');
+const http = require('http');
 const app = express();
+
+// ============================================================================
+// HỆ THỐNG REVERSE PROXY NỘI BỘ (KHẮC PHỤC LỖI PORT TRÊN RENDER)
+// Phải đặt trước body-parser để không bị lỗi stream
+// ============================================================================
+let apisDb = new Map();
+
+app.use('/app/:name', (req, res) => {
+    const name = req.params.name;
+    const api = Array.from(apisDb.values()).find(a => a.name === name);
+    
+    if (!api) {
+        return res.status(404).send(`
+            <div style="background:#09090b;color:#ef4444;font-family:monospace;padding:20px;text-align:center;">
+                <h2>404 - KHÔNG TÌM THẤY WEB</h2>
+                <p>Web [${name}] không tồn tại trên hệ thống.</p>
+            </div>
+        `);
+    }
+    
+    if (api.status !== 'ONLINE') {
+        return res.status(503).send(`
+            <div style="background:#09090b;color:#eab308;font-family:monospace;padding:20px;text-align:center;">
+                <h2>503 - WEB ĐANG TẮT (OFFLINE)</h2>
+                <p>Web [${name}] hiện đang không hoạt động. Vui lòng vào Dashboard bật lại.</p>
+            </div>
+        `);
+    }
+
+    // Proxy request
+    const targetPath = req.url || '/';
+    const options = {
+        hostname: '127.0.0.1',
+        port: api.port,
+        path: targetPath,
+        method: req.method,
+        headers: { ...req.headers, host: `127.0.0.1:${api.port}` }
+    };
+
+    const proxyReq = http.request(options, (proxyRes) => {
+        res.writeHead(proxyRes.statusCode, proxyRes.headers);
+        proxyRes.pipe(res, { end: true });
+    });
+
+    req.pipe(proxyReq, { end: true });
+
+    proxyReq.on('error', (e) => {
+        console.error(`Proxy Error [${name}]:`, e);
+        res.status(502).send('502 - Bad Gateway (Lỗi kết nối tới Server con)');
+    });
+});
 
 // ============================================================================
 // CONFIGURATION
@@ -17,11 +69,10 @@ app.use(express.static(__dirname));
 // ============================================================================
 const DB_FILE = './vantashield_scripts.json';
 const USERS_FILE = './vantashield_users.json';
-const APIS_FILE = './vantashield_apis.json'; // Database cho Web API
+const APIS_FILE = './vantashield_apis.json';
 
 let db = new Map();
 let usersDb = new Map();
-let apisDb = new Map();
 
 // Load existing data
 if (fs.existsSync(DB_FILE)) {
@@ -32,7 +83,6 @@ if (fs.existsSync(USERS_FILE)) {
 }
 if (fs.existsSync(APIS_FILE)) {
     apisDb = new Map(Object.entries(JSON.parse(fs.readFileSync(APIS_FILE, 'utf8'))));
-    // Reset trạng thái các API về OFFLINE khi server khởi động lại
     apisDb.forEach((api, key) => {
         api.status = 'OFFLINE';
         api.pid = null;
@@ -41,7 +91,6 @@ if (fs.existsSync(APIS_FILE)) {
     saveApis();
 }
 
-// Master Admin Default
 if (!usersDb.has('master1')) {
     usersDb.set('master1', { password: 'duykhanh2014' });
     saveUsers();
@@ -149,7 +198,7 @@ body.mobf-root {
 .btn-upload:hover { background: rgba(168, 85, 247, 0.4); color: #fff; }
 input[type="file"] { display: none; }
 
-.quick-card textarea { width: 100%; height: 250px; background: rgba(0,0,0,0.7); border: 1px solid rgba(168, 85, 247, 0.3); border-radius: 10px; color: var(--vs-cyan); font-family: "JetBrains Mono", monospace; font-size: 14px; padding: 14px; box-sizing: border-box; outline: none; transition: all .3s; resize: none; margin-bottom: 15px; }
+.quick-card textarea { width: 100%; height: 250px; background: rgba(0,0,0,0.7); border: 1px solid rgba(168, 85, 247, 0.3); border-radius: 10px; color: var(--vs-cyan); font-family: "JetBrains Mono", monospace; font-size: 13px; padding: 14px; box-sizing: border-box; outline: none; transition: all .3s; resize: none; margin-bottom: 15px; }
 .quick-card textarea:focus { border-color: var(--vs-cyan); box-shadow: 0 0 15px rgba(6, 182, 212, 0.2); }
 
 .btn-save { width: 100%; padding: 16px; border: none; border-radius: 12px; font-family: "Orbitron"; font-size: 15px; font-weight: 700; letter-spacing: 2px; cursor: pointer; color: #fff; background: linear-gradient(135deg, var(--vs-cyan), var(--vs-purple), var(--vs-pink)); background-size: 200% 200%; animation: gradShift 4s ease infinite; transition: all .2s; text-decoration:none; display:block; text-align:center; box-sizing:border-box;}
@@ -186,6 +235,17 @@ input[type="file"] { display: none; }
 .chat-input { flex: 1; background: rgba(0,0,0,0.7); border: 1px solid rgba(168, 85, 247, 0.3); border-radius: 10px; color: #fff; padding: 0 15px; height: 45px; font-family: "JetBrains Mono"; outline: none; }
 .btn-send { background: var(--vs-purple); border: none; color: white; padding: 0 20px; height: 45px; border-radius: 10px; font-family: "Orbitron"; font-weight: bold; cursor: pointer; transition: 0.3s; }
 .btn-send:hover { background: var(--vs-pink); }
+
+/* TERMINAL LOADER */
+#loader-overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.9); z-index: 99999; flex-direction: column; justify-content: center; align-items: center; }
+.terminal-window { width: 90%; max-width: 600px; background: #000; border: 1px solid var(--vs-cyan); border-radius: 10px; overflow: hidden; box-shadow: 0 0 30px rgba(6, 182, 212, 0.3); }
+.terminal-header { background: #111; padding: 10px; display: flex; gap: 8px; border-bottom: 1px solid #333; }
+.terminal-dot { width: 12px; height: 12px; border-radius: 50%; }
+.terminal-body { padding: 20px; font-family: 'JetBrains Mono', monospace; font-size: 14px; color: var(--vs-green); min-height: 250px; display: flex; flex-direction: column; gap: 10px; }
+.term-line { opacity: 0; animation: fadeIn 0.3s forwards; }
+.blink { animation: blinker 1s linear infinite; }
+@keyframes fadeIn { to { opacity: 1; } }
+@keyframes blinker { 50% { opacity: 0; } }
 
 /* TROLL SCREEN & ALERTS */
 .cyber-text-alert { font-family: 'Orbitron', sans-serif; font-size: 13px; font-weight: bold; color: var(--vs-cyan); text-shadow: 0 0 8px rgba(6, 182, 212, 0.6); letter-spacing: 1px; animation: pulseGlow 2s infinite; }
@@ -226,26 +286,26 @@ function copyText(elementId, btnElement) {
     document.body.removeChild(textArea);
 }
 
-// Chức năng copy link động cho Web API (dùng clipboard API)
-function copyApiLink(port, btnElement) {
-    const url = window.location.protocol + '//' + window.location.hostname + ':' + port;
-    if (navigator.clipboard) {
-        navigator.clipboard.writeText(url).then(() => {
-            btnElement.innerText = 'COPIED!'; 
-            btnElement.style.background = 'var(--vs-purple)'; btnElement.style.color = '#fff';
-            setTimeout(() => { btnElement.innerText = 'COPY LINK'; btnElement.style.background = 'var(--vs-gold)'; btnElement.style.color = '#000'; }, 2000);
-        });
-    }
+function copyApiLink(projectName, btnElement) {
+    const url = window.location.origin + '/app/' + projectName;
+    const textArea = document.createElement("textarea");
+    textArea.value = url; document.body.appendChild(textArea); textArea.select();
+    try {
+        document.execCommand('copy');
+        btnElement.innerText = 'COPIED!'; 
+        btnElement.style.background = 'var(--vs-purple)'; btnElement.style.color = '#fff';
+        setTimeout(() => { btnElement.innerText = 'COPY LINK'; btnElement.style.background = 'var(--vs-gold)'; btnElement.style.color = '#000'; }, 2000);
+    } catch(e) {}
+    document.body.removeChild(textArea);
 }
 
-// Chức năng mở Web API trực tiếp
-function openApiLink(port) {
-    const url = window.location.protocol + '//' + window.location.hostname + ':' + port;
+function openApiLink(projectName) {
+    const url = window.location.origin + '/app/' + projectName;
     window.open(url, '_blank');
 }
 
 // ============================================================================
-// AUTO-TRANSLATE SYSTEM (DETECT VIETNAM IP / TIMEZONE)
+// AUTO-TRANSLATE SYSTEM
 // ============================================================================
 const viDict = {
     "NAVIGATION": "ĐIỀU HƯỚNG",
@@ -256,7 +316,7 @@ const viDict = {
     "Create Account": "Tạo Tài Khoản",
     "Creator Home": "Trang Chủ",
     "Script Management": "Quản Lý Mã Nguồn",
-    "API Hosting (Like Render)": "Lưu Trữ API",
+    "Tạo Web (Hosting)": "Tạo Web (Hosting)",
     "VN Chat": "Trò Chuyện VN",
     "Global Chat": "Trò Chuyện Toàn Cầu",
     "Terms of Service": "Điều Khoản Dịch Vụ",
@@ -268,21 +328,6 @@ const viDict = {
     "Type your message here...": "Nhập tin nhắn của bạn...",
     "SEND": "GỬI",
     "Attach File/Image": "Đính Kèm File/Ảnh",
-    "API HOSTING": "LƯU TRỮ API",
-    "PaaS PLATFORM (LIKE RENDER)": "NỀN TẢNG HOSTING (GIỐNG RENDER)",
-    "Khởi chạy API 24/7 miễn phí. Liên kết với kho lưu trữ GitHub hoặc tạo trực tiếp trên web.": "Khởi chạy API 24/7 miễn phí. Liên kết với kho lưu trữ GitHub hoặc tạo trực tiếp trên web.",
-    "DEPLOY FROM GITHUB": "TẠO TỪ GITHUB",
-    "GITHUB REPO URL": "LINK KHO GITHUB",
-    "DEPLOY API": "KHỞI CHẠY API",
-    "Hệ thống sẽ tự động clone repo, đọc package.json và chạy server.js giống hệt Render.": "Hệ thống sẽ tự động clone repo, đọc package.json và chạy server.js giống hệt Render.",
-    "CREATE WEB API DIRECTLY": "TẠO API TRỰC TIẾP TẠI WEB",
-    "START SERVER": "KHỞI ĐỘNG SERVER",
-    "YOUR HOSTED APIS": "CÁC API ĐANG HOẠT ĐỘNG",
-    "PROJECT NAME": "TÊN DỰ ÁN",
-    "SOURCE": "NGUỒN",
-    "STATUS": "TRẠNG THÁI",
-    "ENDPOINT": "ĐƯỜNG DẪN",
-    "ACTIONS": "HÀNH ĐỘNG",
     "SYSTEM LOGIN": "ĐĂNG NHẬP HỆ THỐNG",
     "USERNAME": "TÊN ĐĂNG NHẬP",
     "PASSWORD": "MẬT KHẨU",
@@ -356,7 +401,7 @@ const baseHTML = (content, userSession = null) => {
             <div class="sidebar-menu">
                 <a href="/">🏠 Creator Home</a>
                 <a href="/dashboard">📊 Script Management</a>
-                <a href="/api-hosting" style="color:var(--vs-cyan);">🚀 API Hosting (Like Render)</a>
+                <a href="/api-hosting" style="color:var(--vs-cyan);">🚀 Tạo Web (Hosting)</a>
                 <a href="/chat-vn">🇻🇳 VN Chat</a>
                 <a href="/chat-global">🌍 Global Chat</a>
                 <a href="/tos">📜 Terms of Service</a>
@@ -369,7 +414,7 @@ const baseHTML = (content, userSession = null) => {
                 <a href="/login" style="background:var(--vs-purple); color:#fff; font-size:13px; margin-bottom:10px;">🔑 Login</a>
                 <a href="/register" style="background:var(--vs-cyan); color:#000; font-size:13px; margin-bottom:20px;">📝 Create Account</a>
                 <div style="border-top: 1px solid var(--vs-border); padding-top: 10px;">
-                    <a href="/api-hosting" style="color:var(--vs-cyan); font-size: 13px; display:block; margin-bottom:10px;">🚀 API Hosting (Like Render)</a>
+                    <a href="/api-hosting" style="color:var(--vs-cyan); font-size: 13px; display:block; margin-bottom:10px;">🚀 Tạo Web (Hosting)</a>
                     <a href="/chat-vn" style="color:#fff; font-size: 13px; display:block; margin-bottom:10px;">🇻🇳 VN Chat</a>
                     <a href="/chat-global" style="color:#fff; font-size: 13px; display:block; margin-bottom:10px;">🌍 Global Chat</a>
                     <a href="/tos" style="color:#a1a1aa; font-size: 13px;">📜 Terms of Service</a>
@@ -379,17 +424,29 @@ const baseHTML = (content, userSession = null) => {
     </div>
 
     <main>${content}</main>
+
+    <!-- LOADING OVERLAY -->
+    <div id="loader-overlay">
+        <div class="terminal-window">
+            <div class="terminal-header">
+                <div class="terminal-dot" style="background:#ef4444;"></div>
+                <div class="terminal-dot" style="background:#eab308;"></div>
+                <div class="terminal-dot" style="background:#10b981;"></div>
+                <div style="color:#666; font-size:12px; margin-left:10px; line-height:12px;">VantaShield Server Deploy</div>
+            </div>
+            <div class="terminal-body" id="term-body"></div>
+        </div>
+    </div>
 </body>
 </html>
 `};
 
 // ============================================================================
-// 2. API HOSTING (RENDER CLONE) - HOẠT ĐỘNG THẬT VỚI CHILD_PROCESS
+// 2. CREATE WEB (TẠO WEB BẰNG PACKAGE & SERVER TRỰC TIẾP TẠI WEB)
 // ============================================================================
-
 app.get('/api-hosting', (req, res) => {
     const user = getCookie(req, 'user_session');
-    if (!user) return res.redirect('/login?error=Bạn cần đăng nhập để sử dụng API Hosting.');
+    if (!user) return res.redirect('/login?error=Bạn cần đăng nhập để tạo Web.');
 
     const isAdmin = user === 'master1';
     let rowsHtml = '';
@@ -402,16 +459,16 @@ app.get('/api-hosting', (req, res) => {
                     <td style="color:var(--vs-cyan); font-weight:bold;">${escapeHTML(val.name)}</td>
                     ${isAdmin ? `<td><span class="badge-admin">${val.owner.toUpperCase()}</span></td>` : ''}
                     <td><span style="color: ${statusColor}; font-weight: bold;">${val.status === 'ONLINE' ? '🟢 ONLINE' : '🔴 OFFLINE'}</span></td>
-                    <td>Port: ${val.port}</td>
+                    <td>/app/${val.name}</td>
                     <td>
                         ${val.status === 'ONLINE' ? `
-                            <button class="btn-action btn-open" onclick="openApiLink(${val.port})">OPEN WEB</button>
-                            <button class="btn-action btn-edit" onclick="copyApiLink(${val.port}, this)">COPY LINK</button>
+                            <button class="btn-action btn-open" onclick="openApiLink('${val.name}')">MỞ WEB</button>
+                            <button class="btn-action btn-edit" onclick="copyApiLink('${val.name}', this)">COPY LINK</button>
                             <form action="/api-action/stop/${key}" method="POST" style="display:inline;"><button type="submit" class="btn-action btn-delete">STOP</button></form>
                         ` : `
                             <form action="/api-action/start/${key}" method="POST" style="display:inline;"><button type="submit" class="btn-action btn-start">START</button></form>
                         `}
-                        <form action="/api-action/delete/${key}" method="POST" style="display:inline;" onsubmit="return confirm('Bạn có chắc muốn xóa API này vĩnh viễn?');"><button type="submit" class="btn-action btn-delete" style="background:#52525b;">DEL</button></form>
+                        <form action="/api-action/delete/${key}" method="POST" style="display:inline;" onsubmit="return confirm('Bạn có chắc muốn xóa Web này vĩnh viễn?');"><button type="submit" class="btn-action btn-delete" style="background:#52525b;">XÓA</button></form>
                     </td>
                 </tr>
             `;
@@ -422,112 +479,183 @@ app.get('/api-hosting', (req, res) => {
 
     res.send(baseHTML(`
         <section class="hero">
-            <div class="hero-badge" style="border-color: var(--vs-gold); color: var(--vs-gold); background: rgba(234, 179, 8, 0.1);">PaaS PLATFORM (LIKE RENDER)</div>
-            <h1><span class="line2">API HOSTING</span></h1>
-            <p style="color:#a1a1aa; font-family:'JetBrains Mono'; font-size:14px;">Khởi chạy API 24/7 miễn phí. Liên kết với kho lưu trữ GitHub hoặc tạo trực tiếp trên web.</p>
+            <div class="hero-badge" style="border-color: var(--vs-gold); color: var(--vs-gold); background: rgba(234, 179, 8, 0.1);">VANTASHIELD CLOUD</div>
+            <h1><span class="line2">TẠO WEB (HOSTING)</span></h1>
+            <p style="color:#a1a1aa; font-family:'JetBrains Mono'; font-size:14px;">Khởi tạo dự án Node.js trực tiếp trên web với URL tùy chỉnh.</p>
         </section>
 
         ${msg ? `<div class="center-card-wrap"><div class="alert alert-success">${escapeHTML(msg)}</div></div>` : ''}
 
-        <div class="center-card-wrap" style="max-width: 900px; display: grid; grid-template-columns: 1fr 1fr; gap: 20px;">
-            <!-- LIÊN KẾT GITHUB (Giả lập UI cho tính thẩm mỹ) -->
+        <div class="center-card-wrap" style="max-width: 900px;">
             <div class="quick-card" style="padding: 25px;">
-                <div class="field-label" style="color: var(--vs-cyan); font-size: 15px; margin-bottom: 20px;">
-                    <span style="font-size: 18px;">🔗</span> DEPLOY FROM GITHUB
+                <div class="field-label" style="color: var(--vs-purple); font-size: 15px; margin-bottom: 20px; text-align:center;">
+                    <span style="font-size: 22px;">⚡</span> KHỞI TẠO DỰ ÁN MỚI
                 </div>
-                <form action="#" method="POST">
-                    <label class="field-label">GITHUB REPO URL</label>
-                    <input type="text" name="repo_url" placeholder="https://github.com/user/repo" required style="margin-bottom: 15px;">
+                
+                <form id="deployForm" onsubmit="handleAjaxDeploy(event)">
+                    <label class="field-label">TÊN DỰ ÁN (SẼ THÀNH LINK WEB CỦA BẠN)</label>
+                    <input type="text" name="project_name" placeholder="vidu: web-ban-hang-cua-toi" required pattern="[a-z0-9-]+" title="Chỉ dùng chữ thường, số và dấu gạch ngang (không dấu cách)">
                     
-                    <label class="field-label">BRANCH</label>
-                    <input type="text" name="branch" placeholder="main" value="main" required style="margin-bottom: 15px;">
-                    
-                    <button type="button" class="btn-save" style="background: linear-gradient(135deg, #2ea043, #238636); margin-top: 10px;" onclick="alert('Tính năng Github Deploy đang bảo trì, vui lòng dùng cách CREATE WEB API DIRECTLY bên cạnh!')">DEPLOY API</button>
-                </form>
-                <p style="font-size: 11px; color: #a1a1aa; margin-top: 15px;">Hệ thống sẽ tự động clone repo, đọc package.json và chạy server.js giống hệt Render.</p>
-            </div>
-
-            <!-- TẠO TRỰC TIẾP TRÊN WEB (Hoạt động 100%) -->
-            <div class="quick-card" style="padding: 25px;">
-                <div class="field-label" style="color: var(--vs-purple); font-size: 15px; margin-bottom: 20px;">
-                    <span style="font-size: 18px;">⚡</span> CREATE WEB API DIRECTLY
-                </div>
-                <form action="/deploy-local" method="POST">
-                    <label class="field-label">TÊN DỰ ÁN (PROJECT NAME)</label>
-                    <input type="text" name="project_name" placeholder="my-awesome-api" required style="margin-bottom: 15px;">
-                    
-                    <label class="field-label">server.js</label>
-                    <p style="font-size:11px; color:#a1a1aa; margin-top:-5px; margin-bottom:10px;">Lưu ý: Bạn có thể require('express') vì nó đã có sẵn trên hệ thống. Sử dụng <code>process.env.PORT</code> để nhận Port tự động.</p>
-                    <textarea name="srv_js" style="height: 180px; margin-bottom: 15px; font-size: 12px;">const express = require('express');
+                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom:20px;">
+                        <div>
+                            <label class="field-label" style="color: var(--vs-cyan);">package.json</label>
+                            <textarea name="pkg_json" style="height: 250px; font-family: 'JetBrains Mono';">{
+  "name": "my-web",
+  "version": "1.0.0",
+  "main": "server.js",
+  "dependencies": {
+    "express": "^4.19.2"
+  }
+}</textarea>
+                        </div>
+                        <div>
+                            <label class="field-label" style="color: var(--vs-gold);">server.js</label>
+                            <textarea name="srv_js" style="height: 250px; font-family: 'JetBrains Mono';">const express = require('express');
 const app = express();
 
 app.get('/', (req, res) => {
-    res.json({ status: 'Online 24/7', server: 'VantaShield Host', port: process.env.PORT });
+    res.send('<h1>Web tạo thành công!</h1><p>Đang chạy trên VantaShield Cloud</p>');
 });
 
+// Port tự động được cấp bởi hệ thống
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log('Running on ' + PORT));</textarea>
+app.listen(PORT, () => console.log('Server is running!'));</textarea>
+                        </div>
+                    </div>
                     
-                    <button type="submit" class="btn-save">DEPLOY & START SERVER</button>
+                    <button type="submit" class="btn-save">TIẾN HÀNH TẠO WEB & KHỞI CHẠY</button>
                 </form>
             </div>
         </div>
 
-        <!-- BẢNG QUẢN LÝ API ĐANG CHẠY -->
         <div class="center-card-wrap" style="max-width: 900px;">
             <div class="quick-card">
-                <div class="field-label" style="margin-bottom: 15px;">YOUR HOSTED APIS</div>
+                <div class="field-label" style="margin-bottom: 15px;">CÁC WEB ĐANG HOẠT ĐỘNG</div>
                 <div class="manage-wrap">
                     <table class="manage-table">
                         <thead>
                             <tr>
-                                <th>PROJECT NAME</th>
-                                ${isAdmin ? '<th>OWNER</th>' : ''}
-                                <th>STATUS</th>
-                                <th>PORT</th>
-                                <th>ACTIONS</th>
+                                <th>TÊN DỰ ÁN</th>
+                                ${isAdmin ? '<th>CHỦ SỞ HỮU</th>' : ''}
+                                <th>TRẠNG THÁI</th>
+                                <th>ĐƯỜNG DẪN (LINK)</th>
+                                <th>HÀNH ĐỘNG</th>
                             </tr>
                         </thead>
                         <tbody>
-                            ${rowsHtml || `<tr><td colspan="${isAdmin ? 5 : 4}" style="text-align:center; color:#52525b; padding: 20px;">Chưa có API nào đang chạy.</td></tr>`}
+                            ${rowsHtml || `<tr><td colspan="${isAdmin ? 5 : 4}" style="text-align:center; color:#52525b; padding: 20px;">Bạn chưa tạo web nào.</td></tr>`}
                         </tbody>
                     </table>
                 </div>
             </div>
         </div>
+
+        <script>
+        async function handleAjaxDeploy(e) {
+            e.preventDefault();
+            const form = e.target;
+            const formData = new FormData(form);
+            const data = Object.fromEntries(formData.entries());
+
+            const overlay = document.getElementById('loader-overlay');
+            const term = document.getElementById('term-body');
+            overlay.style.display = 'flex';
+            term.innerHTML = '';
+
+            const appendTerm = (text, delay = 0) => {
+                return new Promise(resolve => {
+                    setTimeout(() => {
+                        const p = document.createElement('div');
+                        p.className = 'term-line';
+                        p.innerHTML = text;
+                        term.appendChild(p);
+                        resolve();
+                    }, delay);
+                });
+            };
+
+            await appendTerm('> System: Đang kiểm tra dữ liệu đầu vào...', 500);
+            await appendTerm('> System: Đang cấp phát thư mục [ ' + data.project_name + ' ]...', 800);
+            await appendTerm('> System: Đang ghi file package.json...', 600);
+            await appendTerm('> System: Đang ghi file server.js...', 600);
+            await appendTerm('> NPM: Đang cài đặt thư viện (có thể mất vài giây) <span class="blink">_</span>', 500);
+
+            try {
+                const response = await fetch('/api-deploy-ajax', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(data)
+                });
+                
+                const result = await response.json();
+                
+                if (result.success) {
+                    await appendTerm('<span style="color:var(--vs-green);">> NPM: Cài đặt hoàn tất!</span>', 0);
+                    await appendTerm('> Server: Đang khởi động Node.js...', 800);
+                    await appendTerm('<br><span style="color:var(--vs-gold); font-size:16px; font-weight:bold;">[ TẠO WEB THÀNH CÔNG ]</span>', 800);
+                    await appendTerm('Link truy cập nội bộ: ' + window.location.origin + '/app/' + result.name, 500);
+                    await appendTerm('Hệ thống sẽ tự động tải lại trang sau 3 giây...', 1000);
+                    
+                    setTimeout(() => {
+                        window.location.href = '/api-hosting?msg=Tạo web thành công!';
+                    }, 3000);
+                } else {
+                    await appendTerm('<br><span style="color:var(--vs-red);">[ LỖI ] ' + result.message + '</span>', 0);
+                    await appendTerm('<button onclick="document.getElementById(\\'loader-overlay\\').style.display=\\'none\\'" style="margin-top:15px; padding:8px; background:#ef4444; color:white; border:none; cursor:pointer;">ĐÓNG</button>', 0);
+                }
+            } catch (err) {
+                await appendTerm('<br><span style="color:var(--vs-red);">[ LỖI MẠNG ] Không thể kết nối tới server.</span>', 0);
+            }
+        }
+        </script>
     `, user));
 });
 
-app.post('/deploy-local', (req, res) => {
+app.post('/api-deploy-ajax', async (req, res) => {
     const user = getCookie(req, 'user_session');
-    if (!user) return res.redirect('/login');
+    if (!user) return res.json({ success: false, message: 'Bạn chưa đăng nhập.' });
 
-    let { project_name, srv_js } = req.body;
-    project_name = project_name.trim().replace(/[^a-zA-Z0-9-_]/g, '');
-    if (!project_name) project_name = 'api-' + Date.now();
+    let { project_name, pkg_json, srv_js } = req.body;
+    project_name = project_name.trim().toLowerCase().replace(/[^a-z0-9-]/g, '');
+    if (!project_name) return res.json({ success: false, message: 'Tên dự án không hợp lệ.' });
+
+    let nameExists = Array.from(apisDb.values()).some(api => api.name === project_name);
+    if (nameExists) return res.json({ success: false, message: 'Tên dự án này đã tồn tại, vui lòng chọn tên khác!' });
 
     const apiId = crypto.randomBytes(4).toString('hex');
     const port = getFreePort();
     const apiDir = path.join(__dirname, 'hosted_apis', apiId);
 
-    if (!fs.existsSync(path.join(__dirname, 'hosted_apis'))) fs.mkdirSync(path.join(__dirname, 'hosted_apis'));
-    fs.mkdirSync(apiDir, { recursive: true });
+    try {
+        if (!fs.existsSync(path.join(__dirname, 'hosted_apis'))) fs.mkdirSync(path.join(__dirname, 'hosted_apis'));
+        fs.mkdirSync(apiDir, { recursive: true });
 
-    let finalCode = srv_js;
-    fs.writeFileSync(path.join(apiDir, 'server.js'), finalCode);
+        fs.writeFileSync(path.join(apiDir, 'package.json'), pkg_json);
+        fs.writeFileSync(path.join(apiDir, 'server.js'), srv_js);
 
-    apisDb.set(apiId, {
-        id: apiId,
-        owner: user,
-        name: project_name,
-        port: port,
-        status: 'OFFLINE', 
-        createdAt: Date.now()
-    });
-    saveApis();
-    startApiProcess(apiId);
+        apisDb.set(apiId, {
+            id: apiId,
+            owner: user,
+            name: project_name,
+            port: port,
+            status: 'OFFLINE', 
+            createdAt: Date.now()
+        });
+        saveApis();
 
-    res.redirect('/api-hosting?msg=Khởi tạo và chạy Web API thành công!');
+        exec('npm install', { cwd: apiDir }, (error, stdout, stderr) => {
+            if (error) {
+                console.error(`[NPM ERROR] ${project_name}:`, stderr);
+                return res.json({ success: false, message: 'Lỗi khi chạy npm install. Kiểm tra lại package.json' });
+            }
+            startApiProcess(apiId);
+            res.json({ success: true, name: project_name });
+        });
+
+    } catch (err) {
+        console.error(err);
+        res.json({ success: false, message: 'Lỗi hệ thống khi tạo file.' });
+    }
 });
 
 function startApiProcess(apiId) {
@@ -583,10 +711,10 @@ app.post('/api-action/:action/:id', (req, res) => {
         api.status = 'OFFLINE';
         apisDb.set(id, api);
         saveApis();
-        return res.redirect('/api-hosting?msg=Đã dừng API.');
+        return res.redirect('/api-hosting?msg=Đã dừng Web.');
     } else if (action === 'start' && !runningProcesses[id]) {
         startApiProcess(id);
-        return res.redirect('/api-hosting?msg=Đã khởi động lại API.');
+        return res.redirect('/api-hosting?msg=Đã khởi động lại Web.');
     } else if (action === 'delete') {
         if (runningProcesses[id]) {
             runningProcesses[id].kill();
@@ -596,7 +724,7 @@ app.post('/api-action/:action/:id', (req, res) => {
         if (fs.existsSync(apiDir)) fs.rmSync(apiDir, { recursive: true, force: true });
         apisDb.delete(id);
         saveApis();
-        return res.redirect('/api-hosting?msg=Đã xóa API vĩnh viễn.');
+        return res.redirect('/api-hosting?msg=Đã xóa Web vĩnh viễn.');
     }
     res.redirect('/api-hosting');
 });
@@ -604,7 +732,6 @@ app.post('/api-action/:action/:id', (req, res) => {
 // ============================================================================
 // 3. CHAT VN & CHAT GLOBAL
 // ============================================================================
-
 const chatTemplate = (title, badgeClass, welcomeMsg) => `
     <section class="hero">
         <div class="hero-badge ${badgeClass}">${title.toUpperCase()} SERVER</div>
@@ -646,12 +773,10 @@ app.get('/chat-global', (req, res) => {
     res.send(baseHTML(chatTemplate('Global Chat', 'badge-global', 'Welcome to the Global Hub Chat. Use the (+) button to attach files, images, or videos.'), user));
 });
 
-
 // ============================================================================
 // 4. CORE ROUTES (HOME, DASHBOARD, LOGIN, TOS, RAW V1)
 // ============================================================================
 
-// HOME: CREATE SCRIPT
 app.get('/', (req, res) => {
     const user = getCookie(req, 'user_session');
     res.send(baseHTML(`
@@ -709,7 +834,6 @@ app.post('/create', (req, res) => {
     `, user === 'guest_anonymous' ? null : user));
 });
 
-// AUTH SYSTEM
 app.get('/register', (req, res) => {
     const error = req.query.error;
     res.send(baseHTML(`
@@ -783,7 +907,6 @@ app.get('/logout', (req, res) => {
     res.redirect('/');
 });
 
-// DASHBOARD QUẢN LÝ SCRIPT
 app.get('/dashboard', (req, res) => {
     const user = getCookie(req, 'user_session');
     if (!user) {
@@ -858,7 +981,6 @@ app.get('/dashboard', (req, res) => {
     `, user));
 });
 
-// CHỈNH SỬA, XÓA, TẢI VỀ SCRIPT
 app.get('/download/:id', (req, res) => {
     const user = getCookie(req, 'user_session');
     if (user !== 'master1') return res.status(403).send("Admin strictly.");
@@ -969,7 +1091,6 @@ app.get('/tos', (req, res) => {
     `, user));
 });
 
-
 // API RAW & ANTI SKID (V1 LAYER) - TROLL SCREEN
 app.all('/v1/:id', (req, res) => {
     const id = req.params.id;
@@ -1012,7 +1133,6 @@ app.all('/v1/:id', (req, res) => {
     `);
 });
 
-// INITIALIZE SERVER
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
     console.log(`[VantaShield.com] Secure Server is running on Port: ${PORT}`);
