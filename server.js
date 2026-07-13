@@ -264,6 +264,272 @@ let usersDb = new Map();
 let chatDb = { vn: [], global: [] };
 
 // Hàm load JSON an toàn
+const loadJSON = (file, const express = require('express');
+const crypto = require('crypto');
+const fs = require('fs');
+const path = require('path');
+const { spawn, exec } = require('child_process');
+const http = require('http');
+const app = express();
+
+// ===== ADDED: OAuth + Session + Ping Monitor =====
+const session = require('express-session');
+const passport = require('passport');
+const GoogleStrategy = require('passport-google-oauth20').Strategy;
+const GitHubStrategy = require('passport-github2').Strategy;
+const DiscordStrategy = require('passport-discord').Strategy;
+
+const DISCORD_INVITE_URL = 'https://discord.gg/C72jAuytN';
+const DISCORD_INVITE_CODE = 'C72jAuytN';
+let REQUIRED_GUILD_ID = process.env.DISCORD_GUILD_ID || null;
+
+// Ping monitor storage
+const PING_FILE = './vantashield_ping.json';
+let pingDb = new Map();
+try { if (fs.existsSync(PING_FILE)) pingDb = new Map(Object.entries(JSON.parse(fs.readFileSync(PING_FILE,'utf8')))); } catch(e){}
+function savePing(){ fs.writeFileSync(PING_FILE, JSON.stringify(Object.fromEntries(pingDb))); }
+const PING_LIMIT_PER_USER = 100;
+
+async function doFetch(url){
+  const fetchFn = global.fetch || (await import('node-fetch')).default;
+  return fetchFn(url, { method: 'GET', headers: { 'User-Agent': 'VantaShield-Ping/1.0' }, redirect: 'follow' });
+}
+async function pingAll(){
+  const jobs = [];
+  pingDb.forEach((entry) => {
+    jobs.push((async () => {
+      const start = Date.now();
+      try {
+        const r = await doFetch(entry.url);
+        entry.lastStatus = r.status;
+        entry.lastOk = r.ok;
+        entry.lastTime = Date.now() - start;
+        entry.lastCheck = Date.now();
+        entry.totalPings = (entry.totalPings||0)+1;
+        if (r.ok) entry.successCount = (entry.successCount||0)+1;
+      } catch(e){
+        entry.lastStatus = 0;
+        entry.lastOk = false;
+        entry.lastTime = Date.now() - start;
+        entry.lastCheck = Date.now();
+        entry.lastError = String(e.message||e).slice(0,120);
+        entry.totalPings = (entry.totalPings||0)+1;
+      }
+    })());
+  });
+  await Promise.allSettled(jobs);
+  savePing();
+}
+setInterval(() => { pingAll().catch(()=>{}); }, 10000);
+
+// Lấy user session thống nhất (cookie cũ hoặc passport OAuth)
+function getSessionUser(req){
+  const cookieUser = getCookie(req, 'user_session');
+  if (cookieUser) return cookieUser;
+  if (req.user && req.user.username) return req.user.username;
+  return null;
+}
+// ===== END ADDED =====
+
+
+// ============================================================================
+// HỆ THỐNG REVERSE PROXY NỘI BỘ (KHẮC PHỤC LỖI PORT TRÊN RENDER)
+// Phải đặt trước body-parser để không bị lỗi stream
+// ============================================================================
+let apisDb = new Map();
+
+app.use('/app/:name', (req, res) => {
+    const name = req.params.name;
+    const api = Array.from(apisDb.values()).find(a => a.name === name);
+    
+    if (!api) {
+        return res.status(404).send(`
+            <div style="background:#000;color:#fff;font-family:monospace;padding:20px;text-align:center;border:1px solid #333;">
+                <h2>404 - KHÔNG TÌM THẤY WEB</h2>
+                <p>Web [${name}] không tồn tại trên hệ thống.</p>
+            </div>
+        `);
+    }
+    
+    if (api.status !== 'ONLINE') {
+        return res.status(503).send(`
+            <div style="background:#000;color:#aaa;font-family:monospace;padding:20px;text-align:center;border:1px solid #333;">
+                <h2>503 - WEB ĐANG TẮT (OFFLINE)</h2>
+                <p>Web [${name}] hiện đang không hoạt động. Vui lòng vào Dashboard bật lại.</p>
+            </div>
+        `);
+    }
+
+    // Proxy request tới port nội bộ
+    const targetPath = req.url || '/';
+    const options = {
+        hostname: '127.0.0.1',
+        port: api.port,
+        path: targetPath,
+        method: req.method,
+        headers: { ...req.headers, host: `127.0.0.1:${api.port}` }
+    };
+
+    const proxyReq = http.request(options, (proxyRes) => {
+        res.writeHead(proxyRes.statusCode, proxyRes.headers);
+        proxyRes.pipe(res, { end: true });
+    });
+
+    req.pipe(proxyReq, { end: true });
+
+    proxyReq.on('error', (e) => {
+        console.error(`Proxy Error [${name}]:`, e);
+        res.status(502).send('502 - Bad Gateway (Lỗi kết nối tới Server con)');
+    });
+});
+
+// ============================================================================
+// CONFIGURATION
+// ============================================================================
+app.use(express.urlencoded({ extended: true, limit: '50mb' }));
+app.use(express.json({ limit: '50mb' }));
+app.use(express.static(__dirname));
+
+// ===== ADDED: Session & Passport wiring =====
+app.use(session({
+  secret: process.env.SESSION_SECRET || 'vantashield-secret-change-me',
+  resave: false,
+  saveUninitialized: false,
+  cookie: { maxAge: 1000 * 60 * 60 * 24 * 7 }
+}));
+app.use(passport.initialize());
+app.use(passport.session());
+passport.serializeUser((u, done) => done(null, u));
+passport.deserializeUser((u, done) => done(null, u));
+
+function registerOAuthUser(profile, provider){
+  const uname = (provider + '_' + (profile.username || profile.displayName || profile.id)).toLowerCase().replace(/[^a-z0-9_]/g,'').slice(0,32);
+  if (!usersDb.has(uname)) { usersDb.set(uname, { password: null, provider, providerId: profile.id, avatar: (profile.photos && profile.photos[0] && profile.photos[0].value) || null }); saveUsers(); }
+  return uname;
+}
+
+if (process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET) {
+  passport.use(new GoogleStrategy({
+    clientID: process.env.GOOGLE_CLIENT_ID,
+    clientSecret: process.env.GOOGLE_CLIENT_SECRET,
+    callbackURL: (process.env.PUBLIC_URL || '') + '/auth/google/callback'
+  }, (at, rt, profile, done) => {
+    const username = registerOAuthUser(profile, 'google');
+    done(null, { username, provider: 'google', profile });
+  }));
+  app.get('/auth/google', passport.authenticate('google', { scope: ['profile','email'] }));
+  app.get('/auth/google/callback', passport.authenticate('google', { failureRedirect: '/login?error=Google login failed' }), (req,res) => {
+    res.cookie('user_session', req.user.username, { maxAge: 1000*60*60*24*7, httpOnly: true });
+    res.redirect('/discord-verify');
+  });
+}
+
+if (process.env.GITHUB_CLIENT_ID && process.env.GITHUB_CLIENT_SECRET) {
+  passport.use(new GitHubStrategy({
+    clientID: process.env.GITHUB_CLIENT_ID,
+    clientSecret: process.env.GITHUB_CLIENT_SECRET,
+    callbackURL: (process.env.PUBLIC_URL || '') + '/auth/github/callback'
+  }, (at, rt, profile, done) => {
+    const username = registerOAuthUser(profile, 'github');
+    done(null, { username, provider: 'github', profile });
+  }));
+  app.get('/auth/github', passport.authenticate('github', { scope: ['user:email'] }));
+  app.get('/auth/github/callback', passport.authenticate('github', { failureRedirect: '/login?error=GitHub login failed' }), (req,res) => {
+    res.cookie('user_session', req.user.username, { maxAge: 1000*60*60*24*7, httpOnly: true });
+    res.redirect('/discord-verify');
+  });
+}
+
+if (process.env.DISCORD_CLIENT_ID && process.env.DISCORD_CLIENT_SECRET) {
+  passport.use(new DiscordStrategy({
+    clientID: process.env.DISCORD_CLIENT_ID,
+    clientSecret: process.env.DISCORD_CLIENT_SECRET,
+    callbackURL: (process.env.PUBLIC_URL || '') + '/auth/discord/callback',
+    scope: ['identify','guilds']
+  }, (at, rt, profile, done) => {
+    const username = registerOAuthUser(profile, 'discord');
+    const guilds = profile.guilds || [];
+    done(null, { username, provider: 'discord', profile, guilds, accessToken: at });
+  }));
+  app.get('/auth/discord', passport.authenticate('discord'));
+  app.get('/auth/discord/callback', passport.authenticate('discord', { failureRedirect: '/login?error=Discord login failed' }), async (req,res) => {
+    // Kiểm tra thành viên guild
+    try {
+      if (!REQUIRED_GUILD_ID) {
+        const fetchFn = global.fetch || (await import('node-fetch')).default;
+        const inv = await fetchFn('https://discord.com/api/v10/invites/' + DISCORD_INVITE_CODE).then(r=>r.json()).catch(()=>null);
+        if (inv && inv.guild && inv.guild.id) REQUIRED_GUILD_ID = inv.guild.id;
+      }
+      const inGuild = REQUIRED_GUILD_ID ? (req.user.guilds||[]).some(g => g.id === REQUIRED_GUILD_ID) : true;
+      req.session.discordVerified = inGuild;
+      res.cookie('user_session', req.user.username, { maxAge: 1000*60*60*24*7, httpOnly: true });
+      if (inGuild) return res.redirect('/');
+      return res.redirect('/discord-gate');
+    } catch(e){
+      return res.redirect('/discord-gate');
+    }
+  });
+}
+
+// Trang thông báo bắt buộc vào Discord
+app.get('/discord-gate', (req,res) => {
+  res.send(baseHTML(`
+    <section class="hero">
+      <div class="hero-badge"><i class="ph-fill ph-discord-logo"></i> DISCORD GATE</div>
+      <h1><span class="line2">JOIN DISCORD TO CONTINUE</span></h1>
+    </section>
+    <div class="center-card-wrap" style="max-width:520px;">
+      <div class="quick-card" style="text-align:center;">
+        <div style="font-size:80px; color:#5865F2; margin-bottom:10px;"><i class="ph-fill ph-discord-logo"></i></div>
+        <p style="color:var(--vs-text-light); margin-bottom:20px;">Bạn cần tham gia server Discord của chúng tôi trước khi sử dụng VantaShield.</p>
+        <a href="${DISCORD_INVITE_URL}" target="_blank" class="btn-save" style="background:#5865F2; color:#fff; margin-bottom:12px;"><i class="ph-fill ph-discord-logo"></i> JOIN DISCORD SERVER</a>
+        <a href="/auth/discord" class="btn-save" style="background:var(--vs-white); color:var(--vs-black);"><i class="ph ph-arrow-clockwise"></i> ĐÃ VÀO, KIỂM TRA LẠI</a>
+        <p style="color:var(--vs-text); font-size:12px; margin-top:15px;">Sau khi bạn Join Discord xong, bấm "Kiểm tra lại".</p>
+      </div>
+    </div>
+  `, getSessionUser(req)));
+});
+
+app.get('/discord-verify', (req,res)=>{
+  if (req.session && req.session.discordVerified) return res.redirect('/');
+  res.redirect('/auth/discord');
+});
+
+// Middleware Discord Gate — chặn mọi trang trước khi vào
+const OPEN_PATHS = ['/discord-gate','/discord-verify','/auth/','/logout','/favicon.ico'];
+app.use((req,res,next) => {
+  if (req.path.startsWith('/app/')) return next(); // reverse proxy web con tự xử lý
+  if (req.path.startsWith('/v1/')) return next();
+  if (req.path.match(/^\/[^/]+\/[^/]+\/refs\/heads\/main\//)) return next(); // raw links
+  if (OPEN_PATHS.some(p => req.path.startsWith(p))) return next();
+  if (req.session && req.session.discordVerified) return next();
+  // Guest được xem trang tĩnh cơ bản nhưng nhấn login sẽ đi qua discord gate
+  // Nếu đã login mà chưa verify -> chặn
+  const u = getSessionUser(req);
+  if (u && !(req.session && req.session.discordVerified)) {
+    if (req.path === '/discord-gate') return next();
+    // Cho phép xem trang / và /login/register nhưng nhấn dashboard sẽ redirect
+    const RESTRICTED = ['/dashboard','/api-hosting','/ping','/chat-vn','/chat-global','/edit','/delete','/download','/create'];
+    if (RESTRICTED.some(p => req.path.startsWith(p))) return res.redirect('/discord-gate');
+  }
+  next();
+});
+// ===== END ADDED =====
+
+
+// ============================================================================
+// DATA PERSISTENCE (LƯU TRỮ VÀO FILE)
+// ============================================================================
+const DB_FILE = './vantashield_scripts.json';
+const USERS_FILE = './vantashield_users.json';
+const APIS_FILE = './vantashield_apis.json';
+const CHAT_FILE = './vantashield_chat.json';
+
+let db = new Map();
+let usersDb = new Map();
+let chatDb = { vn: [], global: [] };
+
+// Hàm load JSON an toàn
 const loadJSON = (file, fallback) => {
     if (fs.existsSync(file)) {
         try { return JSON.parse(fs.readFileSync(file, 'utf8')); } 
@@ -312,10 +578,8 @@ function escapeHTML(str) {
     }[tag]));
 }
 
+// ĐÃ XÓA TÍNH NĂNG BYPASS BẰNG QUERY ?bypass=true ĐỂ TĂNG BẢO MẬT
 function isRobloxExecutor(req) {
-    // Cho phép bypass hiển thị trên trình duyệt nếu chủ sở hữu bấm link trực tiếp từ dashboard
-    if (req.query.bypass === 'true') return true;
-    
     const userAgent = (req.headers['user-agent'] || '').toLowerCase();
     return userAgent.includes('roblox') || 
            userAgent.includes('rblx') || 
@@ -1156,6 +1420,7 @@ app.get('/', (req, res) => {
     `, user));
 });
 
+// ĐÃ XÓA HIỂN THỊ LINK BYPASS TRONG ROUTE /CREATE
 app.post('/create', (req, res) => {
     const user = getCookie(req, 'user_session') || 'guest_anonymous';
     const { code, fileName } = req.body;
@@ -1182,11 +1447,6 @@ app.post('/create', (req, res) => {
                     <div style="font-size: 11px; color: var(--vs-text); margin-bottom: 5px;"><i class="ph ph-terminal"></i> EXECUTOR LOADSTRING:</div>
                     <button type="button" class="copy-btn" onclick="copyText('loadstring-text', this)"><i class="ph ph-copy"></i> COPY</button>
                     <div class="code-preview" id="loadstring-text">${loadstringCommand}</div>
-                </div>
-                
-                <div style="text-align: center; margin-top: 25px; font-size: 13px; background: rgba(255,255,255,0.02); padding: 15px; border-radius: 8px; border: 1px solid var(--vs-border);">
-                    <a href="${rawLink}?bypass=true" target="_blank" style="color: var(--vs-white); font-weight: bold; text-decoration:underline;"><i class="ph ph-eye"></i> Click Here to View Raw Code (Bypass Troll Screen)</a>
-                    <div style="font-size: 11px; color: var(--vs-text); margin-top: 8px;">(Note: Normal browsers will show the Anti-Skid alert without this link. Roblox executors bypass it automatically in-game.)</div>
                 </div>
                 
                 <br>
@@ -1639,4 +1899,46 @@ app.post('/ping/delete/:id', (req,res) => {
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
     console.log(`[VantaShield.com] Secure Server is running on Port: ${PORT}`);
+});) => {
+    if (fs.existsSync(file)) {
+        try { return JSON.parse(fs.readFileSync(file, 'utf8')); } 
+        catch(e) { console.error("Error reading " + file, e); return fallback; }
+    }
+    return fallback;
+};
+
+// Khôi phục Dữ liệu
+db = new Map(Object.entries(loadJSON(DB_FILE, {})));
+usersDb = new Map(Object.entries(loadJSON(USERS_FILE, {})));
+chatDb = loadJSON(CHAT_FILE, { vn: [], global: [] });
+
+let loadedApis = loadJSON(APIS_FILE, {});
+apisDb = new Map(Object.entries(loadedApis));
+apisDb.forEach((api, key) => {
+    api.status = 'OFFLINE';
+    api.pid = null;
+    apisDb.set(key, api);
 });
+saveApis();
+
+// Master Admin Default
+if (!usersDb.has('master1')) {
+    usersDb.set('master1', { password: 'duykhanh2014' });
+    saveUsers();
+}
+
+// Lưu trữ
+function saveDb() { fs.writeFileSync(DB_FILE, JSON.stringify(Object.fromEntries(db))); }
+function saveUsers() { fs.writeFileSync(USERS_FILE, JSON.stringify(Object.fromEntries(usersDb))); }
+function saveApis() { fs.writeFileSync(APIS_FILE, JSON.stringify(Object.fromEntries(apisDb))); }
+function saveChat() { fs.writeFileSync(CHAT_FILE, JSON.stringify(chatDb)); }
+
+// Utilities
+function getCookie(req, name) {
+    const cookies = req.headers.cookie || '';
+    const match = cookies.match(new RegExp('(^| )' + name + '=([^;]+)'));
+    return match ? decodeURIComponent(match[2]) : null;
+}
+
+function escapeHTML(str) {
+    if (!str) return '';
