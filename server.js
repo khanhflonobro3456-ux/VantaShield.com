@@ -6,6 +6,66 @@ const { spawn, exec } = require('child_process');
 const http = require('http');
 const app = express();
 
+// ===== ADDED: OAuth + Session + Ping Monitor =====
+const session = require('express-session');
+const passport = require('passport');
+const GoogleStrategy = require('passport-google-oauth20').Strategy;
+const GitHubStrategy = require('passport-github2').Strategy;
+const DiscordStrategy = require('passport-discord').Strategy;
+
+const DISCORD_INVITE_URL = 'https://discord.gg/C72jAuytN';
+const DISCORD_INVITE_CODE = 'C72jAuytN';
+let REQUIRED_GUILD_ID = process.env.DISCORD_GUILD_ID || null;
+
+// Ping monitor storage
+const PING_FILE = './vantashield_ping.json';
+let pingDb = new Map();
+try { if (fs.existsSync(PING_FILE)) pingDb = new Map(Object.entries(JSON.parse(fs.readFileSync(PING_FILE,'utf8')))); } catch(e){}
+function savePing(){ fs.writeFileSync(PING_FILE, JSON.stringify(Object.fromEntries(pingDb))); }
+const PING_LIMIT_PER_USER = 100;
+
+async function doFetch(url){
+  const fetchFn = global.fetch || (await import('node-fetch')).default;
+  return fetchFn(url, { method: 'GET', headers: { 'User-Agent': 'VantaShield-Ping/1.0' }, redirect: 'follow' });
+}
+async function pingAll(){
+  const jobs = [];
+  pingDb.forEach((entry) => {
+    jobs.push((async () => {
+      const start = Date.now();
+      try {
+        const r = await doFetch(entry.url);
+        entry.lastStatus = r.status;
+        entry.lastOk = r.ok;
+        entry.lastTime = Date.now() - start;
+        entry.lastCheck = Date.now();
+        entry.totalPings = (entry.totalPings||0)+1;
+        if (r.ok) entry.successCount = (entry.successCount||0)+1;
+      } catch(e){
+        entry.lastStatus = 0;
+        entry.lastOk = false;
+        entry.lastTime = Date.now() - start;
+        entry.lastCheck = Date.now();
+        entry.lastError = String(e.message||e).slice(0,120);
+        entry.totalPings = (entry.totalPings||0)+1;
+      }
+    })());
+  });
+  await Promise.allSettled(jobs);
+  savePing();
+}
+setInterval(() => { pingAll().catch(()=>{}); }, 10000);
+
+// Lấy user session thống nhất (cookie cũ hoặc passport OAuth)
+function getSessionUser(req){
+  const cookieUser = getCookie(req, 'user_session');
+  if (cookieUser) return cookieUser;
+  if (req.user && req.user.username) return req.user.username;
+  return null;
+}
+// ===== END ADDED =====
+
+
 // ============================================================================
 // HỆ THỐNG REVERSE PROXY NỘI BỘ (KHẮC PHỤC LỖI PORT TRÊN RENDER)
 // Phải đặt trước body-parser để không bị lỗi stream
@@ -63,6 +123,133 @@ app.use('/app/:name', (req, res) => {
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 app.use(express.json({ limit: '50mb' }));
 app.use(express.static(__dirname));
+
+// ===== ADDED: Session & Passport wiring =====
+app.use(session({
+  secret: process.env.SESSION_SECRET || 'vantashield-secret-change-me',
+  resave: false,
+  saveUninitialized: false,
+  cookie: { maxAge: 1000 * 60 * 60 * 24 * 7 }
+}));
+app.use(passport.initialize());
+app.use(passport.session());
+passport.serializeUser((u, done) => done(null, u));
+passport.deserializeUser((u, done) => done(null, u));
+
+function registerOAuthUser(profile, provider){
+  const uname = (provider + '_' + (profile.username || profile.displayName || profile.id)).toLowerCase().replace(/[^a-z0-9_]/g,'').slice(0,32);
+  if (!usersDb.has(uname)) { usersDb.set(uname, { password: null, provider, providerId: profile.id, avatar: (profile.photos && profile.photos[0] && profile.photos[0].value) || null }); saveUsers(); }
+  return uname;
+}
+
+if (process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET) {
+  passport.use(new GoogleStrategy({
+    clientID: process.env.GOOGLE_CLIENT_ID,
+    clientSecret: process.env.GOOGLE_CLIENT_SECRET,
+    callbackURL: (process.env.PUBLIC_URL || '') + '/auth/google/callback'
+  }, (at, rt, profile, done) => {
+    const username = registerOAuthUser(profile, 'google');
+    done(null, { username, provider: 'google', profile });
+  }));
+  app.get('/auth/google', passport.authenticate('google', { scope: ['profile','email'] }));
+  app.get('/auth/google/callback', passport.authenticate('google', { failureRedirect: '/login?error=Google login failed' }), (req,res) => {
+    res.cookie('user_session', req.user.username, { maxAge: 1000*60*60*24*7, httpOnly: true });
+    res.redirect('/discord-verify');
+  });
+}
+
+if (process.env.GITHUB_CLIENT_ID && process.env.GITHUB_CLIENT_SECRET) {
+  passport.use(new GitHubStrategy({
+    clientID: process.env.GITHUB_CLIENT_ID,
+    clientSecret: process.env.GITHUB_CLIENT_SECRET,
+    callbackURL: (process.env.PUBLIC_URL || '') + '/auth/github/callback'
+  }, (at, rt, profile, done) => {
+    const username = registerOAuthUser(profile, 'github');
+    done(null, { username, provider: 'github', profile });
+  }));
+  app.get('/auth/github', passport.authenticate('github', { scope: ['user:email'] }));
+  app.get('/auth/github/callback', passport.authenticate('github', { failureRedirect: '/login?error=GitHub login failed' }), (req,res) => {
+    res.cookie('user_session', req.user.username, { maxAge: 1000*60*60*24*7, httpOnly: true });
+    res.redirect('/discord-verify');
+  });
+}
+
+if (process.env.DISCORD_CLIENT_ID && process.env.DISCORD_CLIENT_SECRET) {
+  passport.use(new DiscordStrategy({
+    clientID: process.env.DISCORD_CLIENT_ID,
+    clientSecret: process.env.DISCORD_CLIENT_SECRET,
+    callbackURL: (process.env.PUBLIC_URL || '') + '/auth/discord/callback',
+    scope: ['identify','guilds']
+  }, (at, rt, profile, done) => {
+    const username = registerOAuthUser(profile, 'discord');
+    const guilds = profile.guilds || [];
+    done(null, { username, provider: 'discord', profile, guilds, accessToken: at });
+  }));
+  app.get('/auth/discord', passport.authenticate('discord'));
+  app.get('/auth/discord/callback', passport.authenticate('discord', { failureRedirect: '/login?error=Discord login failed' }), async (req,res) => {
+    // Kiểm tra thành viên guild
+    try {
+      if (!REQUIRED_GUILD_ID) {
+        const fetchFn = global.fetch || (await import('node-fetch')).default;
+        const inv = await fetchFn('https://discord.com/api/v10/invites/' + DISCORD_INVITE_CODE).then(r=>r.json()).catch(()=>null);
+        if (inv && inv.guild && inv.guild.id) REQUIRED_GUILD_ID = inv.guild.id;
+      }
+      const inGuild = REQUIRED_GUILD_ID ? (req.user.guilds||[]).some(g => g.id === REQUIRED_GUILD_ID) : true;
+      req.session.discordVerified = inGuild;
+      res.cookie('user_session', req.user.username, { maxAge: 1000*60*60*24*7, httpOnly: true });
+      if (inGuild) return res.redirect('/');
+      return res.redirect('/discord-gate');
+    } catch(e){
+      return res.redirect('/discord-gate');
+    }
+  });
+}
+
+// Trang thông báo bắt buộc vào Discord
+app.get('/discord-gate', (req,res) => {
+  res.send(baseHTML(`
+    <section class="hero">
+      <div class="hero-badge"><i class="ph-fill ph-discord-logo"></i> DISCORD GATE</div>
+      <h1><span class="line2">JOIN DISCORD TO CONTINUE</span></h1>
+    </section>
+    <div class="center-card-wrap" style="max-width:520px;">
+      <div class="quick-card" style="text-align:center;">
+        <div style="font-size:80px; color:#5865F2; margin-bottom:10px;"><i class="ph-fill ph-discord-logo"></i></div>
+        <p style="color:var(--vs-text-light); margin-bottom:20px;">Bạn cần tham gia server Discord của chúng tôi trước khi sử dụng VantaShield.</p>
+        <a href="${DISCORD_INVITE_URL}" target="_blank" class="btn-save" style="background:#5865F2; color:#fff; margin-bottom:12px;"><i class="ph-fill ph-discord-logo"></i> JOIN DISCORD SERVER</a>
+        <a href="/auth/discord" class="btn-save" style="background:var(--vs-white); color:var(--vs-black);"><i class="ph ph-arrow-clockwise"></i> ĐÃ VÀO, KIỂM TRA LẠI</a>
+        <p style="color:var(--vs-text); font-size:12px; margin-top:15px;">Sau khi bạn Join Discord xong, bấm "Kiểm tra lại".</p>
+      </div>
+    </div>
+  `, getSessionUser(req)));
+});
+
+app.get('/discord-verify', (req,res)=>{
+  if (req.session && req.session.discordVerified) return res.redirect('/');
+  res.redirect('/auth/discord');
+});
+
+// Middleware Discord Gate — chặn mọi trang trước khi vào
+const OPEN_PATHS = ['/discord-gate','/discord-verify','/auth/','/logout','/favicon.ico'];
+app.use((req,res,next) => {
+  if (req.path.startsWith('/app/')) return next(); // reverse proxy web con tự xử lý
+  if (req.path.startsWith('/v1/')) return next();
+  if (req.path.match(/^\/[^/]+\/[^/]+\/refs\/heads\/main\//)) return next(); // raw links
+  if (OPEN_PATHS.some(p => req.path.startsWith(p))) return next();
+  if (req.session && req.session.discordVerified) return next();
+  // Guest được xem trang tĩnh cơ bản nhưng nhấn login sẽ đi qua discord gate
+  // Nếu đã login mà chưa verify -> chặn
+  const u = getSessionUser(req);
+  if (u && !(req.session && req.session.discordVerified)) {
+    if (req.path === '/discord-gate') return next();
+    // Cho phép xem trang / và /login/register nhưng nhấn dashboard sẽ redirect
+    const RESTRICTED = ['/dashboard','/api-hosting','/ping','/chat-vn','/chat-global','/edit','/delete','/download','/create'];
+    if (RESTRICTED.some(p => req.path.startsWith(p))) return res.redirect('/discord-gate');
+  }
+  next();
+});
+// ===== END ADDED =====
+
 
 // ============================================================================
 // DATA PERSISTENCE (LƯU TRỮ VÀO FILE)
@@ -437,8 +624,10 @@ const baseHTML = (content, userSession = null) => {
                 <a href="/"><i class="ph ph-house"></i> Creator Home</a>
                 <a href="/dashboard"><i class="ph ph-file-code"></i> Script Management</a>
                 <a href="/api-hosting" style="color:var(--vs-white);"><i class="ph ph-cloud-arrow-up"></i> Tạo Web (Hosting)</a>
+                <a href="/ping" style="color:var(--vs-white);"><i class="ph ph-pulse"></i> Ping Monitor</a>
                 <a href="/chat-vn"><i class="ph ph-chat-circle-dots"></i> VN Chat</a>
                 <a href="/chat-global"><i class="ph ph-globe"></i> Global Chat</a>
+                <a href="${DISCORD_INVITE_URL}" target="_blank" style="color:#5865F2;"><i class="ph-fill ph-discord-logo"></i> Discord Server</a>
                 <a href="/tos"><i class="ph ph-scroll"></i> Terms of Service</a>
                 <a href="/logout" style="color: var(--vs-text); margin-top: 40px;"><i class="ph ph-sign-out"></i> Logout</a>
             </div>
@@ -1057,6 +1246,11 @@ app.get('/login', (req, res) => {
                     <input type="password" name="password" placeholder="Enter password..." required>
                     <button type="submit" class="btn-save" style="margin-top:10px;"><i class="ph ph-sign-in"></i> ACCESS SYSTEM</button>
                 </form>
+                <div style="display:flex; align-items:center; gap:10px; margin:20px 0;"><div style="flex:1;height:1px;background:var(--vs-border);"></div><span style="color:var(--vs-text); font-size:11px;">OR SIGN IN WITH</span><div style="flex:1;height:1px;background:var(--vs-border);"></div></div>
+                <a href="/auth/google" class="btn-save" style="background:#fff; color:#000; margin-bottom:10px;"><i class="ph ph-google-logo"></i> GOOGLE</a>
+                <a href="/auth/github" class="btn-save" style="background:#24292e; color:#fff; margin-bottom:10px;"><i class="ph ph-github-logo"></i> GITHUB</a>
+                <a href="/auth/discord" class="btn-save" style="background:#5865F2; color:#fff;"><i class="ph-fill ph-discord-logo"></i> DISCORD</a>
+                <p style="color:var(--vs-text); font-size:11px; text-align:center; margin-top:15px;">Bạn phải vào <a href="${DISCORD_INVITE_URL}" target="_blank" style="color:#5865F2;">Discord Server</a> trước khi được truy cập.</p>
             </div>
         </div>
     `));
@@ -1069,7 +1263,7 @@ app.post('/login', (req, res) => {
 
     if (user && user.password === password) {
         res.cookie('user_session', cleanUsername, { maxAge: 1000 * 60 * 60 * 24 * 7, httpOnly: true });
-        res.redirect('/dashboard');
+        res.redirect('/discord-verify');
     } else {
         res.redirect('/login?error=Invalid username or password!');
     }
@@ -1364,6 +1558,83 @@ app.all('/v1/:id', (req, res) => {
         </html>
     `);
 });
+
+
+// ============================================================================
+// PING MONITOR (up to 100 URLs, auto ping every 10s)
+// ============================================================================
+app.get('/ping', (req,res) => {
+  const user = getSessionUser(req);
+  if (!user) return res.redirect('/login?error=Cần đăng nhập để dùng Ping Monitor.');
+  const mine = [];
+  pingDb.forEach((v,k) => { if (v.owner === user) mine.push({ id:k, ...v }); });
+  const rows = mine.map(m => {
+    const status = m.lastOk ? 'ONLINE' : (m.lastCheck ? 'DOWN' : 'PENDING');
+    const color = m.lastOk ? 'var(--vs-white)' : (m.lastCheck ? '#ef4444' : 'var(--vs-text)');
+    const uptime = m.totalPings ? Math.round((m.successCount||0)/m.totalPings*100) : 0;
+    return `<tr>
+      <td style="color:var(--vs-white); font-family:'JetBrains Mono'; max-width:280px; overflow:hidden; text-overflow:ellipsis;">${escapeHTML(m.url)}</td>
+      <td><span style="color:${color}; font-weight:bold;">${status} ${m.lastStatus?('('+m.lastStatus+')'):''}</span></td>
+      <td>${m.lastTime||0}ms</td>
+      <td>${uptime}% (${m.successCount||0}/${m.totalPings||0})</td>
+      <td>${m.lastCheck? new Date(m.lastCheck).toLocaleTimeString() : '-'}</td>
+      <td>
+        <form action="/ping/delete/${m.id}" method="POST" style="display:inline;"><button class="btn-action btn-delete"><i class="ph ph-trash"></i> XÓA</button></form>
+      </td>
+    </tr>`;
+  }).join('');
+  const count = mine.length;
+
+  res.send(baseHTML(`
+    <section class="hero">
+      <div class="hero-badge"><i class="ph ph-pulse"></i> UPTIME MONITOR</div>
+      <h1><span class="line2">PING MONITOR</span></h1>
+      <p style="color:var(--vs-text);">Tự động ping mỗi 10 giây · ${count}/${PING_LIMIT_PER_USER} web đang theo dõi</p>
+    </section>
+    <div class="center-card-wrap" style="max-width:1000px;">
+      <div class="quick-card">
+        <form action="/ping/add" method="POST">
+          <label class="field-label"><i class="ph ph-link"></i> URL CẦN PING</label>
+          <input type="text" name="url" placeholder="https://example.com" required>
+          <button type="submit" class="btn-save"><i class="ph ph-plus-circle"></i> THÊM VÀO PING (còn ${PING_LIMIT_PER_USER-count} chỗ)</button>
+        </form>
+      </div>
+      <div class="quick-card" style="margin-top:20px;">
+        <div class="field-label" style="margin-bottom:15px;"><i class="ph ph-list-checks"></i> DANH SÁCH URL</div>
+        <div class="manage-wrap">
+          <table class="manage-table">
+            <thead><tr><th>URL</th><th>STATUS</th><th>THỜI GIAN</th><th>UPTIME</th><th>PING GẦN NHẤT</th><th>HÀNH ĐỘNG</th></tr></thead>
+            <tbody>${rows || '<tr><td colspan="6" style="text-align:center; color:var(--vs-text); padding:20px;">Chưa có URL nào. Thêm URL để bắt đầu ping tự động.</td></tr>'}</tbody>
+          </table>
+        </div>
+        <p style="color:var(--vs-text); font-size:12px; margin-top:15px;"><i class="ph ph-info"></i> Trang tự làm mới sau mỗi 10 giây.</p>
+      </div>
+    </div>
+    <script>setTimeout(()=>location.reload(), 10000);</script>
+  `, user));
+});
+
+app.post('/ping/add', (req,res) => {
+  const user = getSessionUser(req);
+  if (!user) return res.redirect('/login');
+  let url = (req.body.url||'').trim();
+  if (!/^https?:\/\//i.test(url)) url = 'https://' + url;
+  try { new URL(url); } catch(e){ return res.redirect('/ping'); }
+  const mineCount = Array.from(pingDb.values()).filter(v => v.owner === user).length;
+  if (mineCount >= PING_LIMIT_PER_USER) return res.redirect('/ping');
+  const id = crypto.randomBytes(4).toString('hex');
+  pingDb.set(id, { owner: user, url, createdAt: Date.now(), totalPings:0, successCount:0 });
+  savePing();
+  res.redirect('/ping');
+});
+
+app.post('/ping/delete/:id', (req,res) => {
+  const user = getSessionUser(req);
+  const entry = pingDb.get(req.params.id);
+  if (entry && (entry.owner === user || user === 'master1')) { pingDb.delete(req.params.id); savePing(); }
+  res.redirect('/ping');
+});
+
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
