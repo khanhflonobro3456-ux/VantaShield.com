@@ -122,7 +122,6 @@ function getClientIP(req) {
 
 const PUBLIC_ROUTES = [
   '/login', '/register', '/logout', '/favicon.ico',
-  '/reset-master', '/toggle-block',
 ];
 
 app.use((req, res, next) => {
@@ -144,36 +143,44 @@ app.use((req, res, next) => {
   });
 });
 
-// ========== CHỈ CHO PHÉP IP ĐẦU TIÊN (MASTER) ==========
+// ========== MASTER IP (CHỈ CHO PHÉP 1 IP DUY NHẤT) ==========
 let MASTER_IP = null;
 const IP_FILE = './master_ip.json';
+
 try {
   if (fs.existsSync(IP_FILE)) {
     const data = JSON.parse(fs.readFileSync(IP_FILE, 'utf8'));
     MASTER_IP = data.masterIP;
   }
-} catch(e) { console.error('Không đọc được master_ip.json:', e.message); }
+} catch(e) {}
 
-let BLOCK_ALL = false;
+let BLOCK_ALL = false; // vẫn giữ biến, nhưng không hiển thị nút
 
+// Middleware Master IP (sau khi đã lọc IP Việt Nam)
 app.use((req, res, next) => {
   const clientIP = getClientIP(req);
+
+  // Nếu chưa có Master IP, gán IP đầu tiên (IP Việt Nam) làm Master
   if (MASTER_IP === null && clientIP && clientIP !== '0.0.0.0') {
     MASTER_IP = clientIP;
-    try {
-      fs.writeFileSync(IP_FILE, JSON.stringify({ masterIP: MASTER_IP }));
-    } catch (e) { console.error('Không ghi được master_ip.json:', e.message); }
+    try { fs.writeFileSync(IP_FILE, JSON.stringify({ masterIP: MASTER_IP })); } catch(e) {}
   }
+
   const isPublic = PUBLIC_ROUTES.some(r => req.path.startsWith(r)) ||
                    req.path.match(/\.(css|js|png|jpg|jpeg|gif|svg|ico)$/);
   if (isPublic) return next();
 
+  // Nếu BLOCK_ALL = true, chỉ cho phép MASTER_IP
   if (BLOCK_ALL && clientIP !== MASTER_IP) {
     return res.status(403).end();
   }
+
+  // Nếu BLOCK_ALL = false, vẫn chỉ cho phép MASTER_IP (vì chỉ có 1 IP được quyền)
+  // Như vậy BLOCK_ALL không thay đổi hành vi, giữ nguyên logic cũ.
   if (clientIP !== MASTER_IP) {
     return res.status(403).send('Truy cập bị từ chối. Chỉ thiết bị chủ mới được phép.');
   }
+
   next();
 });
 
@@ -191,7 +198,7 @@ app.use(session({
 }));
 
 // ============================================================================
-// KHỞI TẠO CƠ SỞ DỮ LIỆU ĐỊA PHƯƠNG
+// CƠ SỞ DỮ LIỆU JSON (có thể mất khi restart nếu không dùng DB thật)
 // ============================================================================
 const DB_FILE = './vantashield_scripts.json';
 const USERS_FILE = './vantashield_users.json';
@@ -200,17 +207,12 @@ const PING_FILE = './vantashield_ping.json';
 
 function loadJSON(file) {
   try {
-    if (fs.existsSync(file)) {
-      return JSON.parse(fs.readFileSync(file, 'utf8'));
-    }
-  } catch(e) { console.error(`Lỗi đọc file ${file}:`, e.message); }
+    if (fs.existsSync(file)) return JSON.parse(fs.readFileSync(file, 'utf8'));
+  } catch(e) {}
   return {};
 }
-
 function safeWriteFile(file, data) {
-  try {
-    fs.writeFileSync(file, JSON.stringify(data));
-  } catch(e) { console.error(`Lỗi ghi file ${file}:`, e.message); }
+  try { fs.writeFileSync(file, JSON.stringify(data)); } catch(e) {}
 }
 
 let db = new Map(Object.entries(loadJSON(DB_FILE)));
@@ -223,10 +225,7 @@ if (!usersDb.has('master1')) {
   safeWriteFile(USERS_FILE, Object.fromEntries(usersDb));
 }
 
-apisDb.forEach((api, key) => {
-  api.status = 'OFFLINE';
-  api.pid = null;
-});
+apisDb.forEach((api) => { api.status = 'OFFLINE'; api.pid = null; });
 safeWriteFile(APIS_FILE, Object.fromEntries(apisDb));
 
 function saveDb() { safeWriteFile(DB_FILE, Object.fromEntries(db)); }
@@ -238,27 +237,21 @@ function getCookie(req, name) {
   const match = cookies.match(new RegExp('(^| )' + name + '=([^;]+)'));
   return match ? decodeURIComponent(match[2]) : null;
 }
-
 function escapeHTML(str) {
   if (!str) return '';
-  return str.replace(/[&<>'"]/g, tag => ({
-    '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;'
-  }[tag]));
+  return str.replace(/[&<>'"]/g, tag => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' }[tag]));
 }
-
 function isRobloxExecutor(req) {
   const ua = (req.headers['user-agent'] || '').toLowerCase();
   return ua.includes('roblox') || ua.includes('rblx') || !ua.includes('mozilla') ||
          ua.includes('synapse') || ua.includes('krnl') || ua.includes('fluxus') ||
          ua.includes('delta') || ua.includes('hydrogen') || ua.includes('codex') || ua.includes('arceus');
 }
-
 function getFreePort() {
   let maxPort = 8000;
   apisDb.forEach(api => { if (api.port && api.port >= maxPort) maxPort = api.port + 1; });
   return maxPort;
 }
-
 const runningProcesses = {};
 
 // Hỗ trợ fetch cho node cũ
@@ -270,13 +263,11 @@ async function doFetch(url) {
       const nodeFetch = require('node-fetch');
       return await nodeFetch(url, { method: 'GET', headers: { 'User-Agent': 'VantaShield-Ping/1.0' }, redirect: 'follow' });
     }
-  } catch (e) {
-    throw e;
-  }
+  } catch (e) { throw e; }
 }
 
 // ============================================================================
-// GIAO DIỆN CHUNG (style + baseHTML)
+// GIAO DIỆN (style + baseHTML) – ẨN nút "Khóa toàn bộ" và "Reset Master IP"
 // ============================================================================
 const style = `<style>@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&family=Orbitron:wght@400;700;900&display=swap');
 body.mobf-root{--vs-bg:#030303;--vs-card:#0a0a0a;--vs-border:#1f1f1f;--vs-border-hover:#333;--vs-text:#888;--vs-text-light:#e0e0e0;--vs-white:#fff;--vs-black:#000;background:var(--vs-bg);color:var(--vs-text-light);font-family:"JetBrains Mono",monospace;min-height:100vh;margin:0;overflow-x:hidden;position:relative}
@@ -361,10 +352,6 @@ const baseHTML = (content, userSession = null) => {
         <a href="/api-hosting"><i class="ph ph-cloud-arrow-up"></i> Tạo Web (Hosting)</a>
         <a href="/ping"><i class="ph ph-pulse"></i> Ping Monitor</a>
         <a href="/tos"><i class="ph ph-scroll"></i> Terms of Service</a>
-        ${isAdmin ? `
-        <a href="#" id="toggleBlockBtn" style="color:#ff6600"><i class="ph ph-lock-simple"></i> <span id="blockStatus">Khóa toàn bộ (TẮT)</span></a>
-        <a href="/reset-master" style="color:#ef4444"><i class="ph ph-arrow-counter-clockwise"></i> Reset Master IP</a>
-        ` : ''}
         <a href="/logout" style="color:var(--vs-text);margin-top:40px"><i class="ph ph-sign-out"></i> Logout</a>
       </div>
       ` : `
@@ -387,50 +374,21 @@ const baseHTML = (content, userSession = null) => {
       function copyText(id,btn){const t=document.getElementById(id).innerText;const ta=document.createElement('textarea');ta.value=t;document.body.appendChild(ta);ta.select();try{document.execCommand('copy');btn.innerHTML='<i class="ph ph-check"></i> COPIED!';btn.style.background='var(--vs-white)';btn.style.color='var(--vs-black)';setTimeout(()=>{btn.innerHTML='<i class="ph ph-copy"></i> COPY';btn.style.background='var(--vs-border)';btn.style.color='var(--vs-text-light)'},2000)}catch(e){}document.body.removeChild(ta)}
       function copyApiLink(name,btn){const url=window.location.origin+'/app/'+name;const ta=document.createElement('textarea');ta.value=url;document.body.appendChild(ta);ta.select();try{document.execCommand('copy');btn.innerHTML='<i class="ph ph-check"></i> COPIED!';btn.style.borderColor='var(--vs-white)';btn.style.color='var(--vs-white)';setTimeout(()=>{btn.innerHTML='<i class="ph ph-copy"></i> COPY LINK';btn.style.borderColor='var(--vs-border)';btn.style.color='var(--vs-text-light)'},2000)}catch(e){}document.body.removeChild(ta)}
       function openApiLink(name){window.open(window.location.origin+'/app/'+name,'_blank')}
-      ${isAdmin ? `
-      document.addEventListener('DOMContentLoaded',function(){
-        const btn=document.getElementById('toggleBlockBtn');
-        const statusSpan=document.getElementById('blockStatus');
-        if(!btn)return;
-        fetch('/toggle-block',{method:'POST'}).then(r=>r.json()).then(data=>{
-          statusSpan.textContent=data.blocked?'Khóa toàn bộ (BẬT)':'Khóa toàn bộ (TẮT)';
-          btn.style.color=data.blocked?'#ff4444':'#ff6600';
-        }).catch(()=>{});
-        btn.addEventListener('click',function(e){
-          e.preventDefault();
-          fetch('/toggle-block',{method:'POST'}).then(r=>r.json()).then(data=>{
-            statusSpan.textContent=data.blocked?'Khóa toàn bộ (BẬT)':'Khóa toàn bộ (TẮT)';
-            btn.style.color=data.blocked?'#ff4444':'#ff6600';
-            alert(data.blocked?'🔒 Đã khóa toàn bộ! Các IP khác sẽ bị chặn ngay lập tức.':'🔓 Đã mở khóa. Các IP khác có thể truy cập.');
-          }).catch(()=>alert('Lỗi khi gửi yêu cầu.'));
-        });
-      });
-      ` : ''}
     </script>
     <script src="https://unpkg.com/@phosphor-icons/web"></script>
   </body></html>`;
 };
 
 // ============================================================================
-// CÁC ROUTE (KHÔNG CÒN OTP)
+// ROUTES (đã loại bỏ Reset Master IP, ẩn Toggle Block)
 // ============================================================================
 
-// ===== TOGGLE BLOCK ALL =====
+// Route toggle-block vẫn giữ để có thể gọi API nếu cần (không hiển thị giao diện)
 app.post('/toggle-block', (req, res) => {
   const user = getCookie(req, 'user_session');
   if (user !== 'master1') return res.status(403).send('Unauthorized');
   BLOCK_ALL = !BLOCK_ALL;
   res.json({ blocked: BLOCK_ALL });
-});
-
-app.get('/reset-master', (req, res) => {
-  const user = getCookie(req, 'user_session');
-  if (user !== 'master1') return res.status(403).send('Only master1 can reset.');
-  try {
-    if (fs.existsSync(IP_FILE)) fs.unlinkSync(IP_FILE);
-  } catch(e) {}
-  MASTER_IP = null;
-  res.send('Master IP đã reset. Thiết bị tiếp theo sẽ thành chủ.');
 });
 
 // ===== REVERSE PROXY NỘI BỘ (web hosting) =====
@@ -497,7 +455,7 @@ app.get('/api-hosting', (req, res) => {
   `, user));
 });
 
-// ===== API DEPLOY (giữ nguyên, chỉ bỏ phần email) =====
+// ===== API DEPLOY =====
 app.post('/api-deploy-ajax', async (req, res) => {
   const user = getCookie(req, 'user_session');
   if (!user) return res.json({ success: false, message: 'Chưa đăng nhập.' });
@@ -674,7 +632,7 @@ app.post('/ping/delete/:id', (req, res) => {
   res.redirect('/ping');
 });
 
-// ===== CÁC ROUTE CHÍNH: HOME, LOGIN, REGISTER, DASHBOARD, RAW, EDIT, DELETE, TOS =====
+// ===== CÁC ROUTE CHÍNH =====
 app.get('/', (req, res) => {
   const user = getCookie(req, 'user_session');
   res.send(baseHTML(`
@@ -832,7 +790,7 @@ app.get('/tos', (req, res) => {
 });
 
 // ============================================================================
-// RAW SCRIPT & ANTI-SKID
+// RAW SCRIPT & ANTI-SKID (GIỮ NGUYÊN)
 // ============================================================================
 app.all('/:creatorName/:fileName/refs/heads/main/:fileName2', (req, res) => {
   const { creatorName, fileName } = req.params;
@@ -872,7 +830,6 @@ app.all('/v1/:id', (req, res) => {
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`[VantaShield.com] Secure Server running on Port: ${PORT}`);
-  console.log(`Master IP: ${MASTER_IP || '(chưa xác định - đợi request đầu tiên)'}`);
-  console.log(`Block All: ${BLOCK_ALL ? 'BẬT' : 'TẮT'}`);
-  console.log(`Bảo vệ: Chỉ IP Việt Nam, Rate Limit, WAF, User-Agent Filter, Helmet`);
+  console.log(`Master IP: ${MASTER_IP || '(chưa có)'}`);
+  console.log(`Block All (ẩn): ${BLOCK_ALL ? 'BẬT' : 'TẮT'}`);
 });
