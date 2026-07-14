@@ -1,11 +1,14 @@
 {
-  "name": "vantashield-web",
+  "name": "dos-attack-node",
   "version": "1.0.0",
+  "description": "Web panel for DoS attack using Node.js",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
   },
-  "dependencies": {
-    "express": "^4.19.2"
-  }
+  "dependencies": {},
+  "engines": {
+    "node": ">=14.0.0"
+  },
+  "license": "UNLICENSED"
 }
