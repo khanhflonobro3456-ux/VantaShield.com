@@ -5,12 +5,11 @@ const path = require('path');
 const { spawn, exec } = require('child_process');
 const http = require('http');
 const session = require('express-session');
-const nodemailer = require('nodemailer');
 const geoip = require('geoip-lite');
 const helmet = require('helmet');
 const app = express();
 
-// ========== LỚP BẢO VỆ 1: HELMET (Bảo vệ HTTP header) ==========
+// ========== LỚP BẢO VỆ 1: HELMET ==========
 app.use(helmet({
   contentSecurityPolicy: false,
   crossOriginEmbedderPolicy: true,
@@ -31,16 +30,19 @@ app.use(helmet({
 // ========== LỚP BẢO VỆ 2: CHỈ CHO PHÉP IP VIỆT NAM ==========
 function isVietnameseIP(ip) {
   if (ip === '127.0.0.1' || ip === '::1' || ip === '::ffff:127.0.0.1') return true;
-  const geo = geoip.lookup(ip);
-  if (!geo) return false;
-  return geo.country === 'VN';
+  try {
+    const geo = geoip.lookup(ip);
+    return geo && geo.country === 'VN';
+  } catch (e) {
+    return false;
+  }
 }
 
-// ========== LỚP BẢO VỆ 3: RATE LIMITING (tự chế) ==========
+// ========== LỚP BẢO VỆ 3: RATE LIMITING ==========
 const rateLimitStore = new Map();
-const RATE_LIMIT_WINDOW = 60 * 1000;      // 1 phút
-const RATE_LIMIT_MAX = 100;               // tối đa 100 request/phút
-const BLOCK_DURATION = 5 * 60 * 1000;     // chặn 5 phút nếu vượt quá
+const RATE_LIMIT_WINDOW = 60 * 1000;
+const RATE_LIMIT_MAX = 100;
+const BLOCK_DURATION = 5 * 60 * 1000;
 
 function rateLimitMiddleware(req, res, next) {
   const ip = getClientIP(req);
@@ -51,7 +53,7 @@ function rateLimitMiddleware(req, res, next) {
   }
   const record = rateLimitStore.get(ip);
   if (record.blockedUntil > now) {
-    return res.status(429).end(); // quá tải
+    return res.status(429).end();
   }
   if (now - record.firstRequest > RATE_LIMIT_WINDOW) {
     record.count = 1;
@@ -66,7 +68,7 @@ function rateLimitMiddleware(req, res, next) {
   next();
 }
 
-// ========== LỚP BẢO VỆ 4: WAF (Lọc SQLi, XSS, Path Traversal) ==========
+// ========== LỚP BẢO VỆ 4: WAF ==========
 const maliciousPatterns = [
   /(\bselect\b.*\bfrom\b)/i, /(\bunion\b.*\bselect\b)/i,
   /(\binsert\b.*\binto\b)/i, /(\bupdate\b.*\bset\b)/i,
@@ -92,7 +94,7 @@ function wafMiddleware(req, res, next) {
   next();
 }
 
-// ========== LỚP BẢO VỆ 5: LỌC USER-AGENT (chặn bot, crawler, tool tấn công) ==========
+// ========== LỚP BẢO VỆ 5: LỌC USER-AGENT ==========
 const badUserAgents = [
   /curl/i, /wget/i, /python/i, /perl/i, /java/i, /ruby/i,
   /node-fetch/i, /http-client/i, /axios/i, /got/i, /scrapy/i,
@@ -111,56 +113,36 @@ function userAgentFilter(req, res, next) {
   next();
 }
 
-// ========== LỚP BẢO VỆ 6: MIDDLEWARE TỔNG HỢP (Áp dụng cho mọi request) ==========
+// ========== LỚP BẢO VỆ 6: MIDDLEWARE TỔNG HỢP ==========
 function getClientIP(req) {
   const forwarded = req.headers['x-forwarded-for'];
   if (forwarded) return forwarded.split(',')[0].trim();
-  return req.connection.remoteAddress || req.ip || '0.0.0.0';
+  return req.connection?.remoteAddress || req.ip || '0.0.0.0';
 }
 
-// Các route công khai (không áp dụng chặn IP nước ngoài, nhưng vẫn áp dụng rate limit, WAF, user-agent)
-const PUBLIC_ROUTES = ['/verify-email', '/send-otp', '/verify-otp', '/login', '/register', '/logout', '/favicon.ico', '/reset-master', '/toggle-block'];
+const PUBLIC_ROUTES = [
+  '/login', '/register', '/logout', '/favicon.ico',
+  '/reset-master', '/toggle-block',
+];
+
 app.use((req, res, next) => {
-  const isPublic = PUBLIC_ROUTES.some(r => req.path.startsWith(r)) || req.path.match(/\.(css|js|png|jpg|jpeg|gif|svg|ico)$/);
-  // Luôn áp dụng rate limit, user-agent filter, WAF cho tất cả
+  const isPublic = PUBLIC_ROUTES.some(r => req.path.startsWith(r)) ||
+                   req.path.match(/\.(css|js|png|jpg|jpeg|gif|svg|ico)$/);
+
   rateLimitMiddleware(req, res, (err) => {
     if (err) return next(err);
     userAgentFilter(req, res, (err2) => {
       if (err2) return next(err2);
       wafMiddleware(req, res, (err3) => {
         if (err3) return next(err3);
-        // Nếu là route công khai, cho qua luôn (không kiểm tra IP nước ngoài)
         if (isPublic) return next();
-        // Nếu không public, kiểm tra IP Việt Nam
         const ip = getClientIP(req);
-        if (!isVietnameseIP(ip)) {
-          return res.status(403).end(); // chặn IP nước ngoài
-        }
+        if (!isVietnameseIP(ip)) return res.status(403).end();
         next();
       });
     });
   });
 });
-
-// ========== CẤU HÌNH EMAIL ==========
-const EMAIL_TO = 'khanhflonobro778899@gmail.com';
-const transporter = nodemailer.createTransport({
-  service: 'gmail',
-  auth: {
-    user: process.env.EMAIL_USER,
-    pass: process.env.EMAIL_PASS
-  }
-});
-let otpStore = { code: null, expires: null };
-function generateOTP() { return Math.floor(100000 + Math.random() * 900000).toString(); }
-function sendOTPEmail(otp) {
-  return transporter.sendMail({
-    from: process.env.EMAIL_USER,
-    to: EMAIL_TO,
-    subject: 'Mã xác thực VantaShield',
-    html: `<p>Mã OTP của bạn là: <b>${otp}</b></p><p>Mã có hiệu lực trong 5 phút.</p>`
-  });
-}
 
 // ========== CHỈ CHO PHÉP IP ĐẦU TIÊN (MASTER) ==========
 let MASTER_IP = null;
@@ -170,18 +152,20 @@ try {
     const data = JSON.parse(fs.readFileSync(IP_FILE, 'utf8'));
     MASTER_IP = data.masterIP;
   }
-} catch(e){}
+} catch(e) { console.error('Không đọc được master_ip.json:', e.message); }
 
 let BLOCK_ALL = false;
 
-// Middleware master IP + email verification (chạy sau các lớp bảo vệ trên)
 app.use((req, res, next) => {
   const clientIP = getClientIP(req);
-  if (MASTER_IP === null) {
+  if (MASTER_IP === null && clientIP && clientIP !== '0.0.0.0') {
     MASTER_IP = clientIP;
-    fs.writeFileSync(IP_FILE, JSON.stringify({ masterIP: MASTER_IP }));
+    try {
+      fs.writeFileSync(IP_FILE, JSON.stringify({ masterIP: MASTER_IP }));
+    } catch (e) { console.error('Không ghi được master_ip.json:', e.message); }
   }
-  const isPublic = PUBLIC_ROUTES.some(r => req.path.startsWith(r)) || req.path.match(/\.(css|js|png|jpg|jpeg|gif|svg|ico)$/);
+  const isPublic = PUBLIC_ROUTES.some(r => req.path.startsWith(r)) ||
+                   req.path.match(/\.(css|js|png|jpg|jpeg|gif|svg|ico)$/);
   if (isPublic) return next();
 
   if (BLOCK_ALL && clientIP !== MASTER_IP) {
@@ -189,9 +173,6 @@ app.use((req, res, next) => {
   }
   if (clientIP !== MASTER_IP) {
     return res.status(403).send('Truy cập bị từ chối. Chỉ thiết bị chủ mới được phép.');
-  }
-  if (!req.session || !req.session.emailVerified) {
-    return res.redirect('/verify-email');
   }
   next();
 });
@@ -217,33 +198,40 @@ const USERS_FILE = './vantashield_users.json';
 const APIS_FILE = './vantashield_apis.json';
 const PING_FILE = './vantashield_ping.json';
 
-let db = new Map();
-let usersDb = new Map();
-let apisDb = new Map();
-let pingDb = new Map();
+function loadJSON(file) {
+  try {
+    if (fs.existsSync(file)) {
+      return JSON.parse(fs.readFileSync(file, 'utf8'));
+    }
+  } catch(e) { console.error(`Lỗi đọc file ${file}:`, e.message); }
+  return {};
+}
 
-const loadJSON = (file, fallback) => {
-  if (fs.existsSync(file)) {
-    try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch(e) { return fallback; }
-  }
-  return fallback;
-};
+function safeWriteFile(file, data) {
+  try {
+    fs.writeFileSync(file, JSON.stringify(data));
+  } catch(e) { console.error(`Lỗi ghi file ${file}:`, e.message); }
+}
 
-db = new Map(Object.entries(loadJSON(DB_FILE, {})));
-usersDb = new Map(Object.entries(loadJSON(USERS_FILE, {})));
-let loadedApis = loadJSON(APIS_FILE, {});
-apisDb = new Map(Object.entries(loadedApis));
-apisDb.forEach((api, key) => { api.status = 'OFFLINE'; api.pid = null; apisDb.set(key, api); });
-saveApis();
+let db = new Map(Object.entries(loadJSON(DB_FILE)));
+let usersDb = new Map(Object.entries(loadJSON(USERS_FILE)));
+let apisDb = new Map(Object.entries(loadJSON(APIS_FILE)));
+let pingDb = new Map(Object.entries(loadJSON(PING_FILE)));
 
 if (!usersDb.has('master1')) {
   usersDb.set('master1', { password: 'duykhanh2014' });
-  saveUsers();
+  safeWriteFile(USERS_FILE, Object.fromEntries(usersDb));
 }
 
-function saveDb() { fs.writeFileSync(DB_FILE, JSON.stringify(Object.fromEntries(db))); }
-function saveUsers() { fs.writeFileSync(USERS_FILE, JSON.stringify(Object.fromEntries(usersDb))); }
-function saveApis() { fs.writeFileSync(APIS_FILE, JSON.stringify(Object.fromEntries(apisDb))); }
+apisDb.forEach((api, key) => {
+  api.status = 'OFFLINE';
+  api.pid = null;
+});
+safeWriteFile(APIS_FILE, Object.fromEntries(apisDb));
+
+function saveDb() { safeWriteFile(DB_FILE, Object.fromEntries(db)); }
+function saveUsers() { safeWriteFile(USERS_FILE, Object.fromEntries(usersDb)); }
+function saveApis() { safeWriteFile(APIS_FILE, Object.fromEntries(apisDb)); }
 
 function getCookie(req, name) {
   const cookies = req.headers.cookie || '';
@@ -273,97 +261,22 @@ function getFreePort() {
 
 const runningProcesses = {};
 
-// ============================================================================
-// ROUTES XÁC THỰC EMAIL (công khai)
-// ============================================================================
-app.get('/verify-email', (req, res) => {
-  if (req.session && req.session.emailVerified) return res.redirect('/');
-  res.send(`<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Xác thực email</title>
-    <style>body{background:#000;color:#fff;font-family:monospace;display:flex;justify-content:center;align-items:center;height:100vh;margin:0}
-    .card{background:#0a0a0a;border:1px solid #333;padding:30px;border-radius:12px;max-width:400px;width:100%;text-align:center}
-    input{width:100%;padding:12px;background:#000;border:1px solid #333;color:#fff;border-radius:8px;margin:10px 0;font-size:16px}
-    button{background:#fff;color:#000;border:none;padding:12px 20px;border-radius:8px;font-weight:bold;cursor:pointer;width:100%;font-size:16px}
-    button:hover{opacity:0.8}.error{color:#ff4444}.success{color:#44ff44}.resend{background:transparent;border:1px solid #555;color:#aaa;margin-top:10px;font-size:14px}
-    </style></head><body><div class="card"><h2>🔐 Xác thực email</h2><p style="color:#888;">Mã OTP sẽ được gửi đến <b>${EMAIL_TO}</b></p>
-    <form id="otpForm"><input type="text" id="otpInput" placeholder="Nhập mã 6 chữ số" maxlength="6" required>
-    <button type="submit">Xác thực</button><button type="button" id="resendBtn" class="resend">Gửi lại mã</button><div id="message"></div></form>
-    <script>
-      async function sendOTP(){const r=await fetch('/send-otp',{method:'POST'}),d=await r.json();document.getElementById('message').innerHTML=d.success?'<span class="success">✅ Mã OTP đã được gửi!</span>':'<span class="error">❌ '+d.message+'</span>';}
-      document.getElementById('resendBtn').addEventListener('click',sendOTP);
-      document.getElementById('otpForm').addEventListener('submit',async(e)=>{
-        e.preventDefault();const otp=document.getElementById('otpInput').value.trim();if(!otp||otp.length!==6){document.getElementById('message').innerHTML='<span class="error">⚠️ Nhập đủ 6 số</span>';return;}
-        const r=await fetch('/verify-otp',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({otp})}),d=await r.json();
-        document.getElementById('message').innerHTML=d.success?'<span class="success">✅ Xác thực thành công! Đang chuyển...</span>':'<span class="error">❌ '+d.message+'</span>';
-        if(d.success)setTimeout(()=>window.location.href='/',1000);
-      });
-      window.onload=sendOTP;
-    </script></body></html>`);
-});
-
-app.post('/send-otp', (req, res) => {
-  const otp = generateOTP();
-  otpStore.code = otp;
-  otpStore.expires = Date.now() + 5 * 60 * 1000;
-  sendOTPEmail(otp).then(() => res.json({ success: true }))
-    .catch(err => res.status(500).json({ success: false, message: 'Lỗi gửi email' }));
-});
-
-app.post('/verify-otp', (req, res) => {
-  const { otp } = req.body;
-  if (!otp) return res.json({ success: false, message: 'Thiếu mã.' });
-  if (!otpStore.code || !otpStore.expires) return res.json({ success: false, message: 'Hết hạn. Gửi lại.' });
-  if (Date.now() > otpStore.expires) { otpStore.code = null; otpStore.expires = null; return res.json({ success: false, message: 'Mã hết hạn.' }); }
-  if (otp !== otpStore.code) return res.json({ success: false, message: 'Sai mã.' });
-  req.session.emailVerified = true;
-  otpStore.code = null; otpStore.expires = null;
-  res.json({ success: true });
-});
-
-// ===== TOGGLE BLOCK ALL =====
-app.post('/toggle-block', (req, res) => {
-  const user = getCookie(req, 'user_session');
-  if (user !== 'master1') return res.status(403).send('Unauthorized');
-  BLOCK_ALL = !BLOCK_ALL;
-  res.json({ blocked: BLOCK_ALL });
-});
-
-app.get('/reset-master', (req, res) => {
-  const user = getCookie(req, 'user_session');
-  if (user !== 'master1') return res.status(403).send('Only master1 can reset.');
-  if (fs.existsSync(IP_FILE)) {
-    fs.unlinkSync(IP_FILE);
-    MASTER_IP = null;
-    res.send('Master IP đã reset. Thiết bị tiếp theo sẽ thành chủ.');
-  } else {
-    res.send('Không có master IP.');
+// Hỗ trợ fetch cho node cũ
+async function doFetch(url) {
+  try {
+    if (typeof fetch === 'function') {
+      return await fetch(url, { method: 'GET', headers: { 'User-Agent': 'VantaShield-Ping/1.0' }, redirect: 'follow' });
+    } else {
+      const nodeFetch = require('node-fetch');
+      return await nodeFetch(url, { method: 'GET', headers: { 'User-Agent': 'VantaShield-Ping/1.0' }, redirect: 'follow' });
+    }
+  } catch (e) {
+    throw e;
   }
-});
+}
 
 // ============================================================================
-// REVERSE PROXY NỘI BỘ (cho web hosting)
-// ============================================================================
-app.use('/app/:name', (req, res) => {
-  const name = req.params.name;
-  const api = Array.from(apisDb.values()).find(a => a.name === name);
-  if (!api) return res.status(404).send('<h2>404 - KHÔNG TÌM THẤY WEB</h2>');
-  if (api.status !== 'ONLINE') return res.status(503).send('<h2>503 - WEB ĐANG TẮT</h2>');
-  const options = {
-    hostname: '127.0.0.1',
-    port: api.port,
-    path: req.url || '/',
-    method: req.method,
-    headers: { ...req.headers, host: `127.0.0.1:${api.port}` }
-  };
-  const proxyReq = http.request(options, (proxyRes) => {
-    res.writeHead(proxyRes.statusCode, proxyRes.headers);
-    proxyRes.pipe(res, { end: true });
-  });
-  req.pipe(proxyReq, { end: true });
-  proxyReq.on('error', () => res.status(502).send('502 - Bad Gateway'));
-});
-
-// ============================================================================
-// GIAO DIỆN CHUNG (style + baseHTML – đã rút gọn nhưng đầy đủ)
+// GIAO DIỆN CHUNG (style + baseHTML)
 // ============================================================================
 const style = `<style>@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&family=Orbitron:wght@400;700;900&display=swap');
 body.mobf-root{--vs-bg:#030303;--vs-card:#0a0a0a;--vs-border:#1f1f1f;--vs-border-hover:#333;--vs-text:#888;--vs-text-light:#e0e0e0;--vs-white:#fff;--vs-black:#000;background:var(--vs-bg);color:var(--vs-text-light);font-family:"JetBrains Mono",monospace;min-height:100vh;margin:0;overflow-x:hidden;position:relative}
@@ -426,53 +339,126 @@ input[type=file]{display:none}
 const baseHTML = (content, userSession = null) => {
   const isAdmin = userSession === 'master1';
   return `<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>VantaShield.com | Protected Hub</title>${style}</head>
-  <body class="mobf-root"><div class="orb orb1"></div><div class="orb orb2"></div><div class="orb orb3"></div>
-  <nav class="mobf-nav"><a href="/" class="nav-logo"><i class="ph-fill ph-shield-check"></i> VANTASHIELD.COM</a><button class="menu-toggle" onclick="toggleSidebar()"><i class="ph ph-list"></i></button></nav>
-  <div class="sidebar" id="sidebarNav"><div class="sidebar-header"><span>NAVIGATION</span><button class="sidebar-close" onclick="toggleSidebar()"><i class="ph ph-x"></i></button></div>
-  ${userSession ? `
-    <div class="user-badge"><div style="display:flex;justify-content:center;align-items:center;gap:6px;margin-bottom:8px"><i class="ph-fill ph-check-circle" style="color:var(--vs-white)"></i> Logged in as:</div>
-    <b style="color:var(--vs-white);font-size:16px;display:flex;justify-content:center;align-items:center;gap:6px">${escapeHTML(userSession).toUpperCase()} ${isAdmin ? '<i class="ph-fill ph-crown"></i>' : ''}</b></div>
-    <div class="sidebar-menu">
-      <a href="/"><i class="ph ph-house"></i> Creator Home</a>
-      <a href="/dashboard"><i class="ph ph-file-code"></i> Script Management</a>
-      <a href="/api-hosting"><i class="ph ph-cloud-arrow-up"></i> Tạo Web (Hosting)</a>
-      <a href="/ping"><i class="ph ph-pulse"></i> Ping Monitor</a>
-      <a href="/tos"><i class="ph ph-scroll"></i> Terms of Service</a>
-      ${isAdmin ? `<a href="#" id="toggleBlockBtn" style="color:#ff6600"><i class="ph ph-lock-simple"></i> <span id="blockStatus">Khóa toàn bộ (TẮT)</span></a>
-      <a href="/reset-master" style="color:#ef4444"><i class="ph ph-arrow-counter-clockwise"></i> Reset Master IP</a>` : ''}
-      <a href="/logout" style="color:var(--vs-text);margin-top:40px"><i class="ph ph-sign-out"></i> Logout</a>
-    </div>
-  ` : `
-    <div class="user-badge"><i class="ph-fill ph-x-circle" style="margin-right:6px"></i> Not Logged In</div>
-    <div class="sidebar-menu" style="text-align:center">
-      <p style="font-size:12px;color:var(--vs-text);margin-bottom:15px">Log in to securely save, edit, and manage your scripts globally.</p>
-      <a href="/login" style="background:var(--vs-white);color:var(--vs-black);font-size:13px;margin-bottom:10px;justify-content:center"><i class="ph ph-key"></i> Login</a>
-      <a href="/register" style="background:var(--vs-border);color:var(--vs-white);font-size:13px;margin-bottom:20px;justify-content:center"><i class="ph ph-user-plus"></i> Create Account</a>
-      <div style="border-top:1px solid var(--vs-border);padding-top:10px">
-        <a href="/api-hosting"><i class="ph ph-cloud-arrow-up"></i> Tạo Web (Hosting)</a>
-        <a href="/tos" style="color:var(--vs-text)"><i class="ph ph-scroll"></i> Terms of Service</a>
+  <body class="mobf-root">
+    <div class="orb orb1"></div><div class="orb orb2"></div><div class="orb orb3"></div>
+    <nav class="mobf-nav">
+      <a href="/" class="nav-logo"><i class="ph-fill ph-shield-check"></i> VANTASHIELD.COM</a>
+      <button class="menu-toggle" onclick="toggleSidebar()"><i class="ph ph-list"></i></button>
+    </nav>
+    <div class="sidebar" id="sidebarNav">
+      <div class="sidebar-header">
+        <span>NAVIGATION</span>
+        <button class="sidebar-close" onclick="toggleSidebar()"><i class="ph ph-x"></i></button>
       </div>
+      ${userSession ? `
+      <div class="user-badge">
+        <div style="display:flex;justify-content:center;align-items:center;gap:6px;margin-bottom:8px"><i class="ph-fill ph-check-circle" style="color:var(--vs-white)"></i> Logged in as:</div>
+        <b style="color:var(--vs-white);font-size:16px;display:flex;justify-content:center;align-items:center;gap:6px">${escapeHTML(userSession).toUpperCase()} ${isAdmin ? '<i class="ph-fill ph-crown"></i>' : ''}</b>
+      </div>
+      <div class="sidebar-menu">
+        <a href="/"><i class="ph ph-house"></i> Creator Home</a>
+        <a href="/dashboard"><i class="ph ph-file-code"></i> Script Management</a>
+        <a href="/api-hosting"><i class="ph ph-cloud-arrow-up"></i> Tạo Web (Hosting)</a>
+        <a href="/ping"><i class="ph ph-pulse"></i> Ping Monitor</a>
+        <a href="/tos"><i class="ph ph-scroll"></i> Terms of Service</a>
+        ${isAdmin ? `
+        <a href="#" id="toggleBlockBtn" style="color:#ff6600"><i class="ph ph-lock-simple"></i> <span id="blockStatus">Khóa toàn bộ (TẮT)</span></a>
+        <a href="/reset-master" style="color:#ef4444"><i class="ph ph-arrow-counter-clockwise"></i> Reset Master IP</a>
+        ` : ''}
+        <a href="/logout" style="color:var(--vs-text);margin-top:40px"><i class="ph ph-sign-out"></i> Logout</a>
+      </div>
+      ` : `
+      <div class="user-badge"><i class="ph-fill ph-x-circle" style="margin-right:6px"></i> Not Logged In</div>
+      <div class="sidebar-menu" style="text-align:center">
+        <p style="font-size:12px;color:var(--vs-text);margin-bottom:15px">Log in to securely save, edit, and manage your scripts globally.</p>
+        <a href="/login" style="background:var(--vs-white);color:var(--vs-black);font-size:13px;margin-bottom:10px;justify-content:center"><i class="ph ph-key"></i> Login</a>
+        <a href="/register" style="background:var(--vs-border);color:var(--vs-white);font-size:13px;margin-bottom:20px;justify-content:center"><i class="ph ph-user-plus"></i> Create Account</a>
+        <div style="border-top:1px solid var(--vs-border);padding-top:10px">
+          <a href="/api-hosting"><i class="ph ph-cloud-arrow-up"></i> Tạo Web (Hosting)</a>
+          <a href="/tos" style="color:var(--vs-text)"><i class="ph ph-scroll"></i> Terms of Service</a>
+        </div>
+      </div>
+      `}
     </div>
-  `}</div>
-  <main>${content}</main>
-  <script>
-    function toggleSidebar(){document.getElementById('sidebarNav').classList.toggle('active')}
-    function handleFileUpload(e){const f=e.target.files[0];if(!f)return;const r=new FileReader();r.onload=function(e){document.getElementById('codeArea').value=e.target.result};r.readAsText(f)}
-    function copyText(id,btn){const t=document.getElementById(id).innerText;const ta=document.createElement('textarea');ta.value=t;document.body.appendChild(ta);ta.select();try{document.execCommand('copy');btn.innerHTML='<i class="ph ph-check"></i> COPIED!';btn.style.background='var(--vs-white)';btn.style.color='var(--vs-black)';setTimeout(()=>{btn.innerHTML='<i class="ph ph-copy"></i> COPY';btn.style.background='var(--vs-border)';btn.style.color='var(--vs-text-light)'},2000)}catch(e){}document.body.removeChild(ta)}
-    function copyApiLink(name,btn){const url=window.location.origin+'/app/'+name;const ta=document.createElement('textarea');ta.value=url;document.body.appendChild(ta);ta.select();try{document.execCommand('copy');btn.innerHTML='<i class="ph ph-check"></i> COPIED!';btn.style.borderColor='var(--vs-white)';btn.style.color='var(--vs-white)';setTimeout(()=>{btn.innerHTML='<i class="ph ph-copy"></i> COPY LINK';btn.style.borderColor='var(--vs-border)';btn.style.color='var(--vs-text-light)'},2000)}catch(e){}document.body.removeChild(ta)}
-    function openApiLink(name){window.open(window.location.origin+'/app/'+name,'_blank')}
-    ${isAdmin ? `
-    document.addEventListener('DOMContentLoaded',function(){const btn=document.getElementById('toggleBlockBtn');const statusSpan=document.getElementById('blockStatus');if(!btn)return;fetch('/toggle-block',{method:'POST'}).then(r=>r.json()).then(data=>{statusSpan.textContent=data.blocked?'Khóa toàn bộ (BẬT)':'Khóa toàn bộ (TẮT)';btn.style.color=data.blocked?'#ff4444':'#ff6600'}).catch(()=>{});btn.addEventListener('click',function(e){e.preventDefault();fetch('/toggle-block',{method:'POST'}).then(r=>r.json()).then(data=>{statusSpan.textContent=data.blocked?'Khóa toàn bộ (BẬT)':'Khóa toàn bộ (TẮT)';btn.style.color=data.blocked?'#ff4444':'#ff6600';alert(data.blocked?'🔒 Đã khóa toàn bộ! Các IP khác sẽ bị chặn ngay lập tức.':'🔓 Đã mở khóa. Các IP khác có thể truy cập.')}).catch(()=>alert('Lỗi khi gửi yêu cầu.'))})});
-    ` : ''}
-  </script><script src="https://unpkg.com/@phosphor-icons/web"></script></body></html>`;
+    <main>${content}</main>
+    <script>
+      function toggleSidebar(){document.getElementById('sidebarNav').classList.toggle('active')}
+      function handleFileUpload(e){const f=e.target.files[0];if(!f)return;const r=new FileReader();r.onload=function(e){document.getElementById('codeArea').value=e.target.result};r.readAsText(f)}
+      function copyText(id,btn){const t=document.getElementById(id).innerText;const ta=document.createElement('textarea');ta.value=t;document.body.appendChild(ta);ta.select();try{document.execCommand('copy');btn.innerHTML='<i class="ph ph-check"></i> COPIED!';btn.style.background='var(--vs-white)';btn.style.color='var(--vs-black)';setTimeout(()=>{btn.innerHTML='<i class="ph ph-copy"></i> COPY';btn.style.background='var(--vs-border)';btn.style.color='var(--vs-text-light)'},2000)}catch(e){}document.body.removeChild(ta)}
+      function copyApiLink(name,btn){const url=window.location.origin+'/app/'+name;const ta=document.createElement('textarea');ta.value=url;document.body.appendChild(ta);ta.select();try{document.execCommand('copy');btn.innerHTML='<i class="ph ph-check"></i> COPIED!';btn.style.borderColor='var(--vs-white)';btn.style.color='var(--vs-white)';setTimeout(()=>{btn.innerHTML='<i class="ph ph-copy"></i> COPY LINK';btn.style.borderColor='var(--vs-border)';btn.style.color='var(--vs-text-light)'},2000)}catch(e){}document.body.removeChild(ta)}
+      function openApiLink(name){window.open(window.location.origin+'/app/'+name,'_blank')}
+      ${isAdmin ? `
+      document.addEventListener('DOMContentLoaded',function(){
+        const btn=document.getElementById('toggleBlockBtn');
+        const statusSpan=document.getElementById('blockStatus');
+        if(!btn)return;
+        fetch('/toggle-block',{method:'POST'}).then(r=>r.json()).then(data=>{
+          statusSpan.textContent=data.blocked?'Khóa toàn bộ (BẬT)':'Khóa toàn bộ (TẮT)';
+          btn.style.color=data.blocked?'#ff4444':'#ff6600';
+        }).catch(()=>{});
+        btn.addEventListener('click',function(e){
+          e.preventDefault();
+          fetch('/toggle-block',{method:'POST'}).then(r=>r.json()).then(data=>{
+            statusSpan.textContent=data.blocked?'Khóa toàn bộ (BẬT)':'Khóa toàn bộ (TẮT)';
+            btn.style.color=data.blocked?'#ff4444':'#ff6600';
+            alert(data.blocked?'🔒 Đã khóa toàn bộ! Các IP khác sẽ bị chặn ngay lập tức.':'🔓 Đã mở khóa. Các IP khác có thể truy cập.');
+          }).catch(()=>alert('Lỗi khi gửi yêu cầu.'));
+        });
+      });
+      ` : ''}
+    </script>
+    <script src="https://unpkg.com/@phosphor-icons/web"></script>
+  </body></html>`;
 };
 
 // ============================================================================
-// TẤT CẢ CÁC ROUTE CHỨC NĂNG (Hosting, Ping, Dashboard, Raw, v.v...)
-// (Đã được tích hợp sẵn, giữ nguyên từ phiên bản trước)
+// CÁC ROUTE (KHÔNG CÒN OTP)
 // ============================================================================
 
-// ===== TẠO WEB HOSTING PROXY =====
+// ===== TOGGLE BLOCK ALL =====
+app.post('/toggle-block', (req, res) => {
+  const user = getCookie(req, 'user_session');
+  if (user !== 'master1') return res.status(403).send('Unauthorized');
+  BLOCK_ALL = !BLOCK_ALL;
+  res.json({ blocked: BLOCK_ALL });
+});
+
+app.get('/reset-master', (req, res) => {
+  const user = getCookie(req, 'user_session');
+  if (user !== 'master1') return res.status(403).send('Only master1 can reset.');
+  try {
+    if (fs.existsSync(IP_FILE)) fs.unlinkSync(IP_FILE);
+  } catch(e) {}
+  MASTER_IP = null;
+  res.send('Master IP đã reset. Thiết bị tiếp theo sẽ thành chủ.');
+});
+
+// ===== REVERSE PROXY NỘI BỘ (web hosting) =====
+app.use('/app/:name', (req, res) => {
+  try {
+    const name = req.params.name;
+    const api = Array.from(apisDb.values()).find(a => a.name === name);
+    if (!api) return res.status(404).send('<h2>404 - KHÔNG TÌM THẤY WEB</h2>');
+    if (api.status !== 'ONLINE') return res.status(503).send('<h2>503 - WEB ĐANG TẮT</h2>');
+    const options = {
+      hostname: '127.0.0.1',
+      port: api.port,
+      path: req.url || '/',
+      method: req.method,
+      headers: { ...req.headers, host: `127.0.0.1:${api.port}` }
+    };
+    const proxyReq = http.request(options, (proxyRes) => {
+      res.writeHead(proxyRes.statusCode, proxyRes.headers);
+      proxyRes.pipe(res, { end: true });
+    });
+    req.pipe(proxyReq, { end: true });
+    proxyReq.on('error', () => res.status(502).send('502 - Bad Gateway'));
+  } catch (err) {
+    res.status(500).send('Lỗi reverse proxy');
+  }
+});
+
+// ===== API HOSTING TRANG CHÍNH =====
 app.get('/api-hosting', (req, res) => {
   const user = getCookie(req, 'user_session');
   if (!user) return res.redirect('/login?error=Bạn cần đăng nhập để sử dụng API Hosting.');
@@ -511,7 +497,7 @@ app.get('/api-hosting', (req, res) => {
   `, user));
 });
 
-// ===== CÁC API DEPLOY =====
+// ===== API DEPLOY (giữ nguyên, chỉ bỏ phần email) =====
 app.post('/api-deploy-ajax', async (req, res) => {
   const user = getCookie(req, 'user_session');
   if (!user) return res.json({ success: false, message: 'Chưa đăng nhập.' });
@@ -619,11 +605,6 @@ app.post('/api-action/:action/:id', (req, res) => {
 });
 
 // ===== PING MONITOR =====
-async function doFetch(url) {
-  const fetchFn = global.fetch || (await import('node-fetch')).default;
-  return fetchFn(url, { method: 'GET', headers: { 'User-Agent': 'VantaShield-Ping/1.0' }, redirect: 'follow' });
-}
-
 async function pingAll() {
   const jobs = [];
   pingDb.forEach((entry) => {
@@ -648,7 +629,7 @@ async function pingAll() {
     })());
   });
   await Promise.allSettled(jobs);
-  fs.writeFileSync(PING_FILE, JSON.stringify(Object.fromEntries(pingDb)));
+  safeWriteFile(PING_FILE, Object.fromEntries(pingDb));
 }
 setInterval(() => { pingAll().catch(()=>{}); }, 10000);
 
@@ -679,7 +660,7 @@ app.post('/ping/add', (req, res) => {
   try { new URL(url); } catch(e){ return res.redirect('/ping'); }
   const id = crypto.randomBytes(4).toString('hex');
   pingDb.set(id, { owner: user, url, createdAt: Date.now(), totalPings:0, successCount:0 });
-  fs.writeFileSync(PING_FILE, JSON.stringify(Object.fromEntries(pingDb)));
+  safeWriteFile(PING_FILE, Object.fromEntries(pingDb));
   res.redirect('/ping');
 });
 
@@ -688,12 +669,12 @@ app.post('/ping/delete/:id', (req, res) => {
   const entry = pingDb.get(req.params.id);
   if (entry && (entry.owner === user || user === 'master1')) {
     pingDb.delete(req.params.id);
-    fs.writeFileSync(PING_FILE, JSON.stringify(Object.fromEntries(pingDb)));
+    safeWriteFile(PING_FILE, Object.fromEntries(pingDb));
   }
   res.redirect('/ping');
 });
 
-// ===== CÁC ROUTE CHÍNH =====
+// ===== CÁC ROUTE CHÍNH: HOME, LOGIN, REGISTER, DASHBOARD, RAW, EDIT, DELETE, TOS =====
 app.get('/', (req, res) => {
   const user = getCookie(req, 'user_session');
   res.send(baseHTML(`
