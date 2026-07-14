@@ -35,15 +35,27 @@ app.use((req, res, next) => {
   }
   // Nếu IP khác master -> từ chối ngay
   if (clientIP !== MASTER_IP) {
-    // Trả về lỗi 403 với thông báo ngắn gọn, không cho tiếp tục
     res.status(403).send('Truy cập bị từ chối. Chỉ thiết bị chủ mới được phép.');
     return;
   }
   next();
 });
 
+// Reset master IP (chỉ master1)
+app.get('/reset-master', (req, res) => {
+  const user = getCookie(req, 'user_session');
+  if (user !== 'master1') return res.status(403).send('Only master1 can reset.');
+  if (fs.existsSync(IP_FILE)) {
+    fs.unlinkSync(IP_FILE);
+    MASTER_IP = null;
+    res.send('Master IP đã được reset. Thiết bị tiếp theo sẽ trở thành chủ.');
+  } else {
+    res.send('Không có master IP để reset.');
+  }
+});
+
 // ============================================================================
-// CẤU HÌNH EXPRESS + SESSION (giữ lại để đăng nhập username/password)
+// CẤU HÌNH EXPRESS + SESSION
 // ============================================================================
 const session = require('express-session');
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
@@ -165,9 +177,72 @@ app.use('/app/:name', (req, res) => {
 });
 
 // ============================================================================
-// GIAO DIỆN CHUNG & CSS
+// GIAO DIỆN CHUNG & CSS (giữ nguyên style)
 // ============================================================================
-const style = `<style>/* (giữ nguyên style như cũ) */</style>`;
+const style = `<style>
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&family=Orbitron:wght@400;700;900&display=swap');
+body.mobf-root {
+  --vs-bg: #030303; --vs-card: #0a0a0a; --vs-border: #1f1f1f; --vs-border-hover: #333333;
+  --vs-text: #888888; --vs-text-light: #e0e0e0; --vs-white: #ffffff; --vs-black: #000000;
+  background: var(--vs-bg); color: var(--vs-text-light);
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+  min-height: 100vh; margin: 0; overflow-x: hidden; position: relative;
+}
+.mobf-root::before { content: ""; position: fixed; inset: 0; background-image: linear-gradient(rgba(255,255,255,0.02) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,0.02) 1px, transparent 1px); background-size: 40px 40px; animation: gridMove 20s linear infinite; pointer-events: none; z-index: 0; }
+@keyframes gridMove { to { transform: translateY(40px); } }
+.orb { position: fixed; border-radius: 50%; filter: blur(100px); opacity: 0.03; pointer-events: none; z-index: 0; animation: orbFloat 10s ease-in-out infinite; }
+.orb1 { width: 500px; height: 500px; background: #ffffff; top: -100px; left: -100px; }
+.orb2 { width: 450px; height: 450px; background: #ffffff; bottom: -150px; right: -100px; animation-delay: -3s; }
+.orb3 { width: 300px; height: 300px; background: #ffffff; top: 40%; left: 30%; animation-delay: -6s; opacity: 0.01; }
+@keyframes orbFloat { 0%,100%{ transform:translate(0,0) scale(1);} 50%{ transform:translate(30px,-30px) scale(1.1);} }
+.mobf-nav { position: sticky; top: 0; z-index: 100; display: flex; align-items: center; justify-content: space-between; padding: 16px 32px; background: rgba(3,3,3,0.85); backdrop-filter: blur(16px); border-bottom: 1px solid var(--vs-border); }
+.nav-logo { font-family: "Orbitron", sans-serif; font-size: 22px; font-weight: 900; letter-spacing: 2px; color: var(--vs-white); text-decoration: none; display: flex; align-items: center; gap: 8px; }
+.menu-toggle { font-size: 24px; background: none; border: none; color: var(--vs-white); cursor: pointer; transition: 0.3s; display: flex; align-items: center;}
+.menu-toggle:hover { color: var(--vs-text); transform: scale(1.1); }
+.sidebar { position: fixed; top: 0; left: -300px; width: 280px; height: 100vh; background: #050505; border-right: 1px solid var(--vs-border); z-index: 999; padding: 30px 20px; box-sizing: border-box; transition: all 0.4s cubic-bezier(0.77,0,0.175,1); box-shadow: 10px 0 30px rgba(0,0,0,0.9); }
+.sidebar.active { left: 0; }
+.sidebar-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 30px; font-family: "Orbitron"; font-weight: bold; color: var(--vs-text-light); }
+.sidebar-close { background: none; border: none; color: var(--vs-text); font-size: 20px; cursor: pointer; display: flex;}
+.sidebar-close:hover { color: var(--vs-white); }
+.sidebar-menu a { display: flex; align-items: center; gap: 12px; padding: 14px 18px; color: var(--vs-text); text-decoration: none; border-radius: 8px; margin-bottom: 5px; transition: 0.3s; font-weight: bold;}
+.sidebar-menu a i { font-size: 18px; }
+.sidebar-menu a:hover { background: rgba(255,255,255,0.05); color: var(--vs-white); }
+.user-badge { background: rgba(255,255,255,0.02); padding: 12px; border-radius: 8px; font-size: 12px; margin-bottom: 20px; border: 1px solid var(--vs-border); text-align: center; color: var(--vs-text);}
+.hero { position: relative; z-index: 1; text-align: center; padding: 40px 20px 20px; max-width: 860px; margin: 0 auto; }
+.hero-badge { display: inline-flex; align-items: center; gap: 8px; padding: 6px 16px; border: 1px solid var(--vs-border-hover); border-radius: 20px; font-size: 11px; letter-spacing: 2px; text-transform: uppercase; color: var(--vs-text-light); margin-bottom: 20px; background: rgba(255,255,255,0.02); }
+.hero h1 { font-family: "Orbitron", sans-serif; font-size: clamp(26px, 5vw, 42px); font-weight: 900; letter-spacing: 2px; margin: 0 0 10px 0; color: var(--vs-white);}
+.center-card-wrap { position: relative; z-index: 1; max-width: 800px; margin: 0 auto 80px; padding: 0 20px; }
+.quick-card { background: var(--vs-card); border: 1px solid var(--vs-border); border-radius: 12px; padding: 32px; position: relative; overflow: hidden; box-shadow: 0 10px 40px rgba(0,0,0,0.8); }
+.header-flex { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; flex-wrap: wrap; gap: 10px;}
+.field-label { font-size: 13px; letter-spacing: 2px; text-transform: uppercase; color: var(--vs-text-light); font-weight: bold; margin: 0 0 10px 0; display: block;}
+.quick-card input[type="text"], .quick-card input[type="password"] { width: 100%; padding: 14px; background: var(--vs-black); border: 1px solid var(--vs-border); border-radius: 8px; color: var(--vs-white); font-family: "JetBrains Mono", monospace; font-size: 14px; box-sizing: border-box; outline: none; transition: all .3s; margin-bottom: 20px; }
+.quick-card input:focus, .quick-card textarea:focus { border-color: var(--vs-text); box-shadow: 0 0 15px rgba(255,255,255,0.05); }
+.btn-upload { background: rgba(255,255,255,0.02); color: var(--vs-text); border: 1px dashed var(--vs-border-hover); padding: 10px 15px; border-radius: 8px; font-size: 12px; cursor: pointer; transition: all 0.3s; font-family: "Orbitron"; display: inline-flex; align-items: center; gap: 8px; font-weight: bold; }
+.btn-upload:hover { background: rgba(255,255,255,0.05); color: var(--vs-white); border-color: var(--vs-text); }
+input[type="file"] { display: none; }
+.quick-card textarea { width: 100%; height: 250px; background: var(--vs-black); border: 1px solid var(--vs-border); border-radius: 8px; color: var(--vs-text-light); font-family: "JetBrains Mono", monospace; font-size: 13px; padding: 14px; box-sizing: border-box; outline: none; transition: all .3s; resize: none; margin-bottom: 15px; }
+.btn-save { width: 100%; padding: 16px; border: none; border-radius: 8px; font-family: "Orbitron"; font-size: 15px; font-weight: 900; letter-spacing: 2px; cursor: pointer; color: var(--vs-black); background: var(--vs-white); transition: all .2s; text-decoration:none; display:flex; align-items:center; justify-content:center; gap: 10px; box-sizing:border-box;}
+.btn-save:hover { background: var(--vs-text-light); transform: translateY(-2px); box-shadow: 0 8px 25px rgba(255,255,255,0.15); }
+.result-box { margin-top: 15px; padding: 20px; border-radius: 8px; background: var(--vs-black); border: 1px solid var(--vs-border); text-align: left; position: relative;}
+.copy-btn { position: absolute; top: 10px; right: 10px; background: var(--vs-border); color: var(--vs-text-light); border: 1px solid var(--vs-border-hover); padding: 8px 16px; border-radius: 6px; font-size: 12px; font-weight: bold; cursor: pointer; font-family: "Orbitron"; transition: 0.3s; }
+.copy-btn:hover { background: var(--vs-white); color: var(--vs-black); }
+.code-preview { color: var(--vs-text-light); word-break: break-all; font-size: 13px; line-height: 1.5; margin-top: 10px; white-space: pre-wrap; }
+.manage-wrap { overflow-x: auto; width: 100%; }
+.manage-table { width: 100%; min-width: 600px; border-collapse: collapse; margin-top: 15px; font-size: 13px; }
+.manage-table th { background: rgba(255,255,255,0.02); color: var(--vs-text-light); padding: 12px; text-align: left; border-bottom: 1px solid var(--vs-border); font-family: "Orbitron"; }
+.manage-table td { padding: 14px 12px; border-bottom: 1px solid rgba(255,255,255,0.02); vertical-align: middle; }
+.btn-action { padding: 6px 10px; border: 1px solid var(--vs-border); border-radius: 6px; font-family: "JetBrains Mono"; cursor: pointer; font-weight: bold; font-size: 11px; text-decoration: none; margin-right: 5px; display: inline-flex; align-items:center; gap:6px; margin-bottom: 5px; background: var(--vs-black); color: var(--vs-text-light); transition: 0.2s;}
+.btn-action:hover { border-color: var(--vs-text); color: var(--vs-white); }
+.btn-delete:hover { border-color: #ef4444; color: #ef4444; }
+.badge-admin { background: var(--vs-white); color: var(--vs-black); padding: 2px 6px; border-radius: 4px; font-size: 10px; font-weight: bold; }
+.alert { padding: 15px; background: rgba(255,255,255,0.05); border: 1px solid var(--vs-border); color: var(--vs-text-light); border-radius: 8px; margin-bottom: 20px; text-align: center; font-weight: bold; }
+.alert-success { background: rgba(255,255,255,0.1); border: 1px solid var(--vs-text); color: var(--vs-white); }
+.tos-list { text-align: left; margin-top: 20px; }
+.tos-item { margin-bottom: 25px; padding-bottom: 15px; border-bottom: 1px solid var(--vs-border); }
+.tos-title { font-family: 'Orbitron'; font-size: 16px; color: var(--vs-white); margin-bottom: 8px; font-weight: bold; }
+.tos-title span { color: var(--vs-text); margin-right: 8px; }
+.tos-desc { font-size: 14px; color: var(--vs-text); line-height: 1.6; }
+</style>`;
 
 const baseHTML = (content, userSession = null) => {
   const isAdmin = userSession === 'master1';
@@ -208,6 +283,7 @@ const baseHTML = (content, userSession = null) => {
         <a href="/api-hosting"><i class="ph ph-cloud-arrow-up"></i> Tạo Web (Hosting)</a>
         <a href="/ping"><i class="ph ph-pulse"></i> Ping Monitor</a>
         <a href="/tos"><i class="ph ph-scroll"></i> Terms of Service</a>
+        ${isAdmin ? `<a href="/reset-master" style="color:#ef4444;"><i class="ph ph-arrow-counter-clockwise"></i> Reset Master IP</a>` : ''}
         <a href="/logout" style="color: var(--vs-text); margin-top: 40px;"><i class="ph ph-sign-out"></i> Logout</a>
       </div>
     ` : `
@@ -371,7 +447,6 @@ app.get('/api-hosting', (req, res) => {
   `, user));
 });
 
-// Các route AJAX cho deploy (giữ nguyên logic)
 app.post('/api-deploy-ajax', async (req, res) => {
   const user = getCookie(req, 'user_session');
   if (!user) return res.json({ success: false, message: 'Chưa đăng nhập.' });
@@ -479,7 +554,7 @@ app.post('/api-action/:action/:id', (req, res) => {
 });
 
 // ============================================================================
-// PING MONITOR (giữ nguyên)
+// PING MONITOR
 // ============================================================================
 async function doFetch(url) {
   const fetchFn = global.fetch || (await import('node-fetch')).default;
@@ -632,7 +707,6 @@ app.post('/create', (req, res) => {
   `, user === 'guest_anonymous' ? null : user));
 });
 
-// Đăng ký / Đăng nhập
 app.get('/register', (req, res) => {
   const error = req.query.error;
   res.send(baseHTML(`
@@ -705,7 +779,6 @@ app.get('/logout', (req, res) => {
   res.redirect('/');
 });
 
-// Dashboard
 app.get('/dashboard', (req, res) => {
   const user = getCookie(req, 'user_session');
   if (!user) return res.redirect('/login?error=Please login.');
