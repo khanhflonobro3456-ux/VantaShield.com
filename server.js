@@ -6,24 +6,153 @@ const { spawn, exec } = require('child_process');
 const http = require('http');
 const session = require('express-session');
 const nodemailer = require('nodemailer');
+const geoip = require('geoip-lite');
+const helmet = require('helmet');
 const app = express();
 
-// ===== CẤU HÌNH EMAIL =====
+// ========== LỚP BẢO VỆ 1: HELMET (Bảo vệ HTTP header) ==========
+app.use(helmet({
+  contentSecurityPolicy: false,
+  crossOriginEmbedderPolicy: true,
+  crossOriginOpenerPolicy: true,
+  crossOriginResourcePolicy: { policy: "same-site" },
+  dnsPrefetchControl: true,
+  frameguard: { action: "deny" },
+  hidePoweredBy: true,
+  hsts: { maxAge: 31536000, includeSubDomains: true, preload: true },
+  ieNoOpen: true,
+  noSniff: true,
+  originAgentCluster: true,
+  permittedCrossDomainPolicies: { permittedPolicies: "none" },
+  referrerPolicy: { policy: "no-referrer" },
+  xssFilter: true,
+}));
+
+// ========== LỚP BẢO VỆ 2: CHỈ CHO PHÉP IP VIỆT NAM ==========
+function isVietnameseIP(ip) {
+  if (ip === '127.0.0.1' || ip === '::1' || ip === '::ffff:127.0.0.1') return true;
+  const geo = geoip.lookup(ip);
+  if (!geo) return false;
+  return geo.country === 'VN';
+}
+
+// ========== LỚP BẢO VỆ 3: RATE LIMITING (tự chế) ==========
+const rateLimitStore = new Map();
+const RATE_LIMIT_WINDOW = 60 * 1000;      // 1 phút
+const RATE_LIMIT_MAX = 100;               // tối đa 100 request/phút
+const BLOCK_DURATION = 5 * 60 * 1000;     // chặn 5 phút nếu vượt quá
+
+function rateLimitMiddleware(req, res, next) {
+  const ip = getClientIP(req);
+  const now = Date.now();
+  if (!rateLimitStore.has(ip)) {
+    rateLimitStore.set(ip, { count: 1, firstRequest: now, blockedUntil: 0 });
+    return next();
+  }
+  const record = rateLimitStore.get(ip);
+  if (record.blockedUntil > now) {
+    return res.status(429).end(); // quá tải
+  }
+  if (now - record.firstRequest > RATE_LIMIT_WINDOW) {
+    record.count = 1;
+    record.firstRequest = now;
+    return next();
+  }
+  record.count++;
+  if (record.count > RATE_LIMIT_MAX) {
+    record.blockedUntil = now + BLOCK_DURATION;
+    return res.status(429).end();
+  }
+  next();
+}
+
+// ========== LỚP BẢO VỆ 4: WAF (Lọc SQLi, XSS, Path Traversal) ==========
+const maliciousPatterns = [
+  /(\bselect\b.*\bfrom\b)/i, /(\bunion\b.*\bselect\b)/i,
+  /(\binsert\b.*\binto\b)/i, /(\bupdate\b.*\bset\b)/i,
+  /(\bdelete\b.*\bfrom\b)/i, /(\bdrop\b.*\btable\b)/i,
+  /(\balter\b.*\btable\b)/i, /(\bexec\b.*\bxp_)/i,
+  /<script.*?>.*?<\/script>/i, /onerror\s*=/i,
+  /onload\s*=/i, /onclick\s*=/i, /javascript:/i,
+  /\.\.\//, /%2e%2e%2f/i,
+];
+
+function wafMiddleware(req, res, next) {
+  const check = (value) => {
+    if (typeof value !== 'string') return false;
+    return maliciousPatterns.some(pattern => pattern.test(value));
+  };
+  for (let key in req.query) if (check(req.query[key])) return res.status(403).end();
+  if (req.body) {
+    for (let key in req.body) {
+      if (typeof req.body[key] === 'string' && check(req.body[key])) return res.status(403).end();
+    }
+  }
+  for (let key in req.params) if (check(req.params[key])) return res.status(403).end();
+  next();
+}
+
+// ========== LỚP BẢO VỆ 5: LỌC USER-AGENT (chặn bot, crawler, tool tấn công) ==========
+const badUserAgents = [
+  /curl/i, /wget/i, /python/i, /perl/i, /java/i, /ruby/i,
+  /node-fetch/i, /http-client/i, /axios/i, /got/i, /scrapy/i,
+  /selenium/i, /phantomjs/i, /headless/i, /puppeteer/i,
+  /bedrock/i, /libwww/i, /lwp/i, /urllib/i, /masscan/i,
+  /nmap/i, /zmap/i, /openvas/i, /nessus/i, /sqlmap/i,
+  /havij/i, /nikto/i, /dirbuster/i, /gobuster/i, /wfuzz/i,
+  /ffuf/i, /hydra/i, /medusa/i, /aircrack/i, /john/i, /hashcat/i,
+];
+
+function userAgentFilter(req, res, next) {
+  const ua = req.headers['user-agent'] || '';
+  if (badUserAgents.some(pattern => pattern.test(ua))) {
+    return res.status(403).end();
+  }
+  next();
+}
+
+// ========== LỚP BẢO VỆ 6: MIDDLEWARE TỔNG HỢP (Áp dụng cho mọi request) ==========
+function getClientIP(req) {
+  const forwarded = req.headers['x-forwarded-for'];
+  if (forwarded) return forwarded.split(',')[0].trim();
+  return req.connection.remoteAddress || req.ip || '0.0.0.0';
+}
+
+// Các route công khai (không áp dụng chặn IP nước ngoài, nhưng vẫn áp dụng rate limit, WAF, user-agent)
+const PUBLIC_ROUTES = ['/verify-email', '/send-otp', '/verify-otp', '/login', '/register', '/logout', '/favicon.ico', '/reset-master', '/toggle-block'];
+app.use((req, res, next) => {
+  const isPublic = PUBLIC_ROUTES.some(r => req.path.startsWith(r)) || req.path.match(/\.(css|js|png|jpg|jpeg|gif|svg|ico)$/);
+  // Luôn áp dụng rate limit, user-agent filter, WAF cho tất cả
+  rateLimitMiddleware(req, res, (err) => {
+    if (err) return next(err);
+    userAgentFilter(req, res, (err2) => {
+      if (err2) return next(err2);
+      wafMiddleware(req, res, (err3) => {
+        if (err3) return next(err3);
+        // Nếu là route công khai, cho qua luôn (không kiểm tra IP nước ngoài)
+        if (isPublic) return next();
+        // Nếu không public, kiểm tra IP Việt Nam
+        const ip = getClientIP(req);
+        if (!isVietnameseIP(ip)) {
+          return res.status(403).end(); // chặn IP nước ngoài
+        }
+        next();
+      });
+    });
+  });
+});
+
+// ========== CẤU HÌNH EMAIL ==========
 const EMAIL_TO = 'khanhflonobro778899@gmail.com';
 const transporter = nodemailer.createTransport({
   service: 'gmail',
   auth: {
-    user: process.env.EMAIL_USER, // email gửi đi (cần set biến môi trường)
-    pass: process.env.EMAIL_PASS  // mật khẩu ứng dụng Gmail
+    user: process.env.EMAIL_USER,
+    pass: process.env.EMAIL_PASS
   }
 });
-
 let otpStore = { code: null, expires: null };
-
-function generateOTP() {
-  return Math.floor(100000 + Math.random() * 900000).toString();
-}
-
+function generateOTP() { return Math.floor(100000 + Math.random() * 900000).toString(); }
 function sendOTPEmail(otp) {
   return transporter.sendMail({
     from: process.env.EMAIL_USER,
@@ -33,7 +162,7 @@ function sendOTPEmail(otp) {
   });
 }
 
-// ===== CHỈ CHO PHÉP IP ĐẦU TIÊN (MASTER) =====
+// ========== CHỈ CHO PHÉP IP ĐẦU TIÊN (MASTER) ==========
 let MASTER_IP = null;
 const IP_FILE = './master_ip.json';
 try {
@@ -43,44 +172,36 @@ try {
   }
 } catch(e){}
 
-function getClientIP(req) {
-  const forwarded = req.headers['x-forwarded-for'];
-  if (forwarded) return forwarded.split(',')[0].trim();
-  return req.connection.remoteAddress || req.ip || '0.0.0.0';
-}
+let BLOCK_ALL = false;
 
-// ===== MIDDLEWARE: MASTER IP + EMAIL VERIFICATION =====
-const PUBLIC_ROUTES = ['/verify-email', '/send-otp', '/verify-otp', '/login', '/register', '/logout', '/favicon.ico', '/reset-master'];
-const STATIC_EXT = ['.css', '.js', '.png', '.jpg', '.jpeg', '.gif', '.svg', '.ico'];
-
+// Middleware master IP + email verification (chạy sau các lớp bảo vệ trên)
 app.use((req, res, next) => {
   const clientIP = getClientIP(req);
   if (MASTER_IP === null) {
     MASTER_IP = clientIP;
     fs.writeFileSync(IP_FILE, JSON.stringify({ masterIP: MASTER_IP }));
   }
-
-  const isPublic = PUBLIC_ROUTES.some(r => req.path.startsWith(r)) || STATIC_EXT.some(ext => req.path.endsWith(ext));
+  const isPublic = PUBLIC_ROUTES.some(r => req.path.startsWith(r)) || req.path.match(/\.(css|js|png|jpg|jpeg|gif|svg|ico)$/);
   if (isPublic) return next();
 
+  if (BLOCK_ALL && clientIP !== MASTER_IP) {
+    return res.status(403).end();
+  }
   if (clientIP !== MASTER_IP) {
     return res.status(403).send('Truy cập bị từ chối. Chỉ thiết bị chủ mới được phép.');
   }
-
   if (!req.session || !req.session.emailVerified) {
     return res.redirect('/verify-email');
   }
-
   next();
 });
 
 // ============================================================================
-// CẤU HÌNH EXPRESS
+// CẤU HÌNH EXPRESS & SESSION
 // ============================================================================
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 app.use(express.json({ limit: '50mb' }));
 app.use(express.static(__dirname));
-
 app.use(session({
   secret: process.env.SESSION_SECRET || 'vantashield-secret-change-me',
   resave: false,
@@ -157,94 +278,53 @@ const runningProcesses = {};
 // ============================================================================
 app.get('/verify-email', (req, res) => {
   if (req.session && req.session.emailVerified) return res.redirect('/');
-  res.send(`
-    <!DOCTYPE html>
-    <html>
-    <head><meta charset="UTF-8"><title>Xác thực email</title>
-    <style>
-      body { background: #000; color: #fff; font-family: monospace; display: flex; justify-content: center; align-items: center; height: 100vh; margin:0; }
-      .card { background: #0a0a0a; border: 1px solid #333; padding: 30px; border-radius: 12px; max-width: 400px; width: 100%; text-align: center; }
-      input { width: 100%; padding: 12px; background: #000; border: 1px solid #333; color: #fff; border-radius: 8px; margin: 10px 0; font-size: 16px; }
-      button { background: #fff; color: #000; border: none; padding: 12px 20px; border-radius: 8px; font-weight: bold; cursor: pointer; width: 100%; font-size: 16px; }
-      button:hover { opacity: 0.8; }
-      .error { color: #ff4444; font-size: 14px; margin-top: 10px; }
-      .success { color: #44ff44; }
-      .resend { background: transparent; border: 1px solid #555; color: #aaa; margin-top: 10px; font-size: 14px; }
-    </style>
-    </head>
-    <body>
-      <div class="card">
-        <h2>🔐 Xác thực email</h2>
-        <p style="color:#888;">Mã OTP sẽ được gửi đến <b>${EMAIL_TO}</b></p>
-        <form id="otpForm">
-          <input type="text" id="otpInput" placeholder="Nhập mã 6 chữ số" maxlength="6" required>
-          <button type="submit" id="verifyBtn">Xác thực</button>
-          <button type="button" id="resendBtn" class="resend">Gửi lại mã</button>
-          <div id="message"></div>
-        </form>
-      </div>
-      <script>
-        async function sendOTP() {
-          const res = await fetch('/send-otp', { method: 'POST' });
-          const data = await res.json();
-          const msg = document.getElementById('message');
-          if (data.success) msg.innerHTML = '<span class="success">✅ Mã OTP đã được gửi!</span>';
-          else msg.innerHTML = '<span class="error">❌ Lỗi gửi mã: ' + data.message + '</span>';
-        }
-        document.getElementById('resendBtn').addEventListener('click', sendOTP);
-        document.getElementById('otpForm').addEventListener('submit', async (e) => {
-          e.preventDefault();
-          const otp = document.getElementById('otpInput').value.trim();
-          if (!otp || otp.length !== 6) {
-            document.getElementById('message').innerHTML = '<span class="error">⚠️ Vui lòng nhập đủ 6 chữ số.</span>';
-            return;
-          }
-          const res = await fetch('/verify-otp', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ otp })
-          });
-          const data = await res.json();
-          const msg = document.getElementById('message');
-          if (data.success) {
-            msg.innerHTML = '<span class="success">✅ Xác thực thành công! Đang chuyển hướng...</span>';
-            setTimeout(() => window.location.href = '/', 1000);
-          } else {
-            msg.innerHTML = '<span class="error">❌ ' + data.message + '</span>';
-          }
-        });
-        window.onload = sendOTP;
-      </script>
-    </body>
-    </html>
-  `);
+  res.send(`<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Xác thực email</title>
+    <style>body{background:#000;color:#fff;font-family:monospace;display:flex;justify-content:center;align-items:center;height:100vh;margin:0}
+    .card{background:#0a0a0a;border:1px solid #333;padding:30px;border-radius:12px;max-width:400px;width:100%;text-align:center}
+    input{width:100%;padding:12px;background:#000;border:1px solid #333;color:#fff;border-radius:8px;margin:10px 0;font-size:16px}
+    button{background:#fff;color:#000;border:none;padding:12px 20px;border-radius:8px;font-weight:bold;cursor:pointer;width:100%;font-size:16px}
+    button:hover{opacity:0.8}.error{color:#ff4444}.success{color:#44ff44}.resend{background:transparent;border:1px solid #555;color:#aaa;margin-top:10px;font-size:14px}
+    </style></head><body><div class="card"><h2>🔐 Xác thực email</h2><p style="color:#888;">Mã OTP sẽ được gửi đến <b>${EMAIL_TO}</b></p>
+    <form id="otpForm"><input type="text" id="otpInput" placeholder="Nhập mã 6 chữ số" maxlength="6" required>
+    <button type="submit">Xác thực</button><button type="button" id="resendBtn" class="resend">Gửi lại mã</button><div id="message"></div></form>
+    <script>
+      async function sendOTP(){const r=await fetch('/send-otp',{method:'POST'}),d=await r.json();document.getElementById('message').innerHTML=d.success?'<span class="success">✅ Mã OTP đã được gửi!</span>':'<span class="error">❌ '+d.message+'</span>';}
+      document.getElementById('resendBtn').addEventListener('click',sendOTP);
+      document.getElementById('otpForm').addEventListener('submit',async(e)=>{
+        e.preventDefault();const otp=document.getElementById('otpInput').value.trim();if(!otp||otp.length!==6){document.getElementById('message').innerHTML='<span class="error">⚠️ Nhập đủ 6 số</span>';return;}
+        const r=await fetch('/verify-otp',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({otp})}),d=await r.json();
+        document.getElementById('message').innerHTML=d.success?'<span class="success">✅ Xác thực thành công! Đang chuyển...</span>':'<span class="error">❌ '+d.message+'</span>';
+        if(d.success)setTimeout(()=>window.location.href='/',1000);
+      });
+      window.onload=sendOTP;
+    </script></body></html>`);
 });
 
 app.post('/send-otp', (req, res) => {
   const otp = generateOTP();
   otpStore.code = otp;
   otpStore.expires = Date.now() + 5 * 60 * 1000;
-
-  sendOTPEmail(otp)
-    .then(() => res.json({ success: true }))
-    .catch(err => {
-      console.error('Lỗi gửi email:', err);
-      res.status(500).json({ success: false, message: 'Không thể gửi email. Kiểm tra cấu hình.' });
-    });
+  sendOTPEmail(otp).then(() => res.json({ success: true }))
+    .catch(err => res.status(500).json({ success: false, message: 'Lỗi gửi email' }));
 });
 
 app.post('/verify-otp', (req, res) => {
   const { otp } = req.body;
-  if (!otp) return res.json({ success: false, message: 'Thiếu mã OTP.' });
-  if (!otpStore.code || !otpStore.expires) return res.json({ success: false, message: 'Chưa có mã OTP hoặc mã đã hết hạn. Vui lòng gửi lại.' });
-  if (Date.now() > otpStore.expires) {
-    otpStore.code = null; otpStore.expires = null;
-    return res.json({ success: false, message: 'Mã OTP đã hết hạn. Vui lòng gửi lại.' });
-  }
-  if (otp !== otpStore.code) return res.json({ success: false, message: 'Mã OTP không đúng.' });
+  if (!otp) return res.json({ success: false, message: 'Thiếu mã.' });
+  if (!otpStore.code || !otpStore.expires) return res.json({ success: false, message: 'Hết hạn. Gửi lại.' });
+  if (Date.now() > otpStore.expires) { otpStore.code = null; otpStore.expires = null; return res.json({ success: false, message: 'Mã hết hạn.' }); }
+  if (otp !== otpStore.code) return res.json({ success: false, message: 'Sai mã.' });
   req.session.emailVerified = true;
   otpStore.code = null; otpStore.expires = null;
   res.json({ success: true });
+});
+
+// ===== TOGGLE BLOCK ALL =====
+app.post('/toggle-block', (req, res) => {
+  const user = getCookie(req, 'user_session');
+  if (user !== 'master1') return res.status(403).send('Unauthorized');
+  BLOCK_ALL = !BLOCK_ALL;
+  res.json({ blocked: BLOCK_ALL });
 });
 
 app.get('/reset-master', (req, res) => {
@@ -253,14 +333,14 @@ app.get('/reset-master', (req, res) => {
   if (fs.existsSync(IP_FILE)) {
     fs.unlinkSync(IP_FILE);
     MASTER_IP = null;
-    res.send('Master IP đã được reset. Thiết bị tiếp theo sẽ trở thành chủ.');
+    res.send('Master IP đã reset. Thiết bị tiếp theo sẽ thành chủ.');
   } else {
-    res.send('Không có master IP để reset.');
+    res.send('Không có master IP.');
   }
 });
 
 // ============================================================================
-// REVERSE PROXY NỘI BỘ
+// REVERSE PROXY NỘI BỘ (cho web hosting)
 // ============================================================================
 app.use('/app/:name', (req, res) => {
   const name = req.params.name;
@@ -283,178 +363,116 @@ app.use('/app/:name', (req, res) => {
 });
 
 // ============================================================================
-// GIAO DIỆN CHUNG & CSS (rút gọn để tiết kiệm, nhưng đầy đủ chức năng)
+// GIAO DIỆN CHUNG (style + baseHTML – đã rút gọn nhưng đầy đủ)
 // ============================================================================
-const style = `<style>
-@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&family=Orbitron:wght@400;700;900&display=swap');
-body.mobf-root {
-  --vs-bg: #030303; --vs-card: #0a0a0a; --vs-border: #1f1f1f; --vs-border-hover: #333333;
-  --vs-text: #888888; --vs-text-light: #e0e0e0; --vs-white: #ffffff; --vs-black: #000000;
-  background: var(--vs-bg); color: var(--vs-text-light);
-  font-family: "JetBrains Mono", ui-monospace, monospace;
-  min-height: 100vh; margin: 0; overflow-x: hidden; position: relative;
-}
-.mobf-root::before { content: ""; position: fixed; inset: 0; background-image: linear-gradient(rgba(255,255,255,0.02) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,0.02) 1px, transparent 1px); background-size: 40px 40px; animation: gridMove 20s linear infinite; pointer-events: none; z-index: 0; }
-@keyframes gridMove { to { transform: translateY(40px); } }
-.orb { position: fixed; border-radius: 50%; filter: blur(100px); opacity: 0.03; pointer-events: none; z-index: 0; animation: orbFloat 10s ease-in-out infinite; }
-.orb1 { width: 500px; height: 500px; background: #ffffff; top: -100px; left: -100px; }
-.orb2 { width: 450px; height: 450px; background: #ffffff; bottom: -150px; right: -100px; animation-delay: -3s; }
-.orb3 { width: 300px; height: 300px; background: #ffffff; top: 40%; left: 30%; animation-delay: -6s; opacity: 0.01; }
-@keyframes orbFloat { 0%,100%{ transform:translate(0,0) scale(1);} 50%{ transform:translate(30px,-30px) scale(1.1);} }
-.mobf-nav { position: sticky; top: 0; z-index: 100; display: flex; align-items: center; justify-content: space-between; padding: 16px 32px; background: rgba(3,3,3,0.85); backdrop-filter: blur(16px); border-bottom: 1px solid var(--vs-border); }
-.nav-logo { font-family: "Orbitron", sans-serif; font-size: 22px; font-weight: 900; letter-spacing: 2px; color: var(--vs-white); text-decoration: none; display: flex; align-items: center; gap: 8px; }
-.menu-toggle { font-size: 24px; background: none; border: none; color: var(--vs-white); cursor: pointer; transition: 0.3s; display: flex; align-items: center;}
-.menu-toggle:hover { color: var(--vs-text); transform: scale(1.1); }
-.sidebar { position: fixed; top: 0; left: -300px; width: 280px; height: 100vh; background: #050505; border-right: 1px solid var(--vs-border); z-index: 999; padding: 30px 20px; box-sizing: border-box; transition: all 0.4s cubic-bezier(0.77,0,0.175,1); box-shadow: 10px 0 30px rgba(0,0,0,0.9); }
-.sidebar.active { left: 0; }
-.sidebar-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 30px; font-family: "Orbitron"; font-weight: bold; color: var(--vs-text-light); }
-.sidebar-close { background: none; border: none; color: var(--vs-text); font-size: 20px; cursor: pointer; display: flex;}
-.sidebar-close:hover { color: var(--vs-white); }
-.sidebar-menu a { display: flex; align-items: center; gap: 12px; padding: 14px 18px; color: var(--vs-text); text-decoration: none; border-radius: 8px; margin-bottom: 5px; transition: 0.3s; font-weight: bold;}
-.sidebar-menu a i { font-size: 18px; }
-.sidebar-menu a:hover { background: rgba(255,255,255,0.05); color: var(--vs-white); }
-.user-badge { background: rgba(255,255,255,0.02); padding: 12px; border-radius: 8px; font-size: 12px; margin-bottom: 20px; border: 1px solid var(--vs-border); text-align: center; color: var(--vs-text);}
-.hero { position: relative; z-index: 1; text-align: center; padding: 40px 20px 20px; max-width: 860px; margin: 0 auto; }
-.hero-badge { display: inline-flex; align-items: center; gap: 8px; padding: 6px 16px; border: 1px solid var(--vs-border-hover); border-radius: 20px; font-size: 11px; letter-spacing: 2px; text-transform: uppercase; color: var(--vs-text-light); margin-bottom: 20px; background: rgba(255,255,255,0.02); }
-.hero h1 { font-family: "Orbitron", sans-serif; font-size: clamp(26px, 5vw, 42px); font-weight: 900; letter-spacing: 2px; margin: 0 0 10px 0; color: var(--vs-white);}
-.center-card-wrap { position: relative; z-index: 1; max-width: 800px; margin: 0 auto 80px; padding: 0 20px; }
-.quick-card { background: var(--vs-card); border: 1px solid var(--vs-border); border-radius: 12px; padding: 32px; position: relative; overflow: hidden; box-shadow: 0 10px 40px rgba(0,0,0,0.8); }
-.header-flex { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; flex-wrap: wrap; gap: 10px;}
-.field-label { font-size: 13px; letter-spacing: 2px; text-transform: uppercase; color: var(--vs-text-light); font-weight: bold; margin: 0 0 10px 0; display: block;}
-.quick-card input[type="text"], .quick-card input[type="password"] { width: 100%; padding: 14px; background: var(--vs-black); border: 1px solid var(--vs-border); border-radius: 8px; color: var(--vs-white); font-family: "JetBrains Mono", monospace; font-size: 14px; box-sizing: border-box; outline: none; transition: all .3s; margin-bottom: 20px; }
-.quick-card input:focus, .quick-card textarea:focus { border-color: var(--vs-text); box-shadow: 0 0 15px rgba(255,255,255,0.05); }
-.btn-upload { background: rgba(255,255,255,0.02); color: var(--vs-text); border: 1px dashed var(--vs-border-hover); padding: 10px 15px; border-radius: 8px; font-size: 12px; cursor: pointer; transition: all 0.3s; font-family: "Orbitron"; display: inline-flex; align-items: center; gap: 8px; font-weight: bold; }
-.btn-upload:hover { background: rgba(255,255,255,0.05); color: var(--vs-white); border-color: var(--vs-text); }
-input[type="file"] { display: none; }
-.quick-card textarea { width: 100%; height: 250px; background: var(--vs-black); border: 1px solid var(--vs-border); border-radius: 8px; color: var(--vs-text-light); font-family: "JetBrains Mono", monospace; font-size: 13px; padding: 14px; box-sizing: border-box; outline: none; transition: all .3s; resize: none; margin-bottom: 15px; }
-.btn-save { width: 100%; padding: 16px; border: none; border-radius: 8px; font-family: "Orbitron"; font-size: 15px; font-weight: 900; letter-spacing: 2px; cursor: pointer; color: var(--vs-black); background: var(--vs-white); transition: all .2s; text-decoration:none; display:flex; align-items:center; justify-content:center; gap: 10px; box-sizing:border-box;}
-.btn-save:hover { background: var(--vs-text-light); transform: translateY(-2px); box-shadow: 0 8px 25px rgba(255,255,255,0.15); }
-.result-box { margin-top: 15px; padding: 20px; border-radius: 8px; background: var(--vs-black); border: 1px solid var(--vs-border); text-align: left; position: relative;}
-.copy-btn { position: absolute; top: 10px; right: 10px; background: var(--vs-border); color: var(--vs-text-light); border: 1px solid var(--vs-border-hover); padding: 8px 16px; border-radius: 6px; font-size: 12px; font-weight: bold; cursor: pointer; font-family: "Orbitron"; transition: 0.3s; }
-.copy-btn:hover { background: var(--vs-white); color: var(--vs-black); }
-.code-preview { color: var(--vs-text-light); word-break: break-all; font-size: 13px; line-height: 1.5; margin-top: 10px; white-space: pre-wrap; }
-.manage-wrap { overflow-x: auto; width: 100%; }
-.manage-table { width: 100%; min-width: 600px; border-collapse: collapse; margin-top: 15px; font-size: 13px; }
-.manage-table th { background: rgba(255,255,255,0.02); color: var(--vs-text-light); padding: 12px; text-align: left; border-bottom: 1px solid var(--vs-border); font-family: "Orbitron"; }
-.manage-table td { padding: 14px 12px; border-bottom: 1px solid rgba(255,255,255,0.02); vertical-align: middle; }
-.btn-action { padding: 6px 10px; border: 1px solid var(--vs-border); border-radius: 6px; font-family: "JetBrains Mono"; cursor: pointer; font-weight: bold; font-size: 11px; text-decoration: none; margin-right: 5px; display: inline-flex; align-items:center; gap:6px; margin-bottom: 5px; background: var(--vs-black); color: var(--vs-text-light); transition: 0.2s;}
-.btn-action:hover { border-color: var(--vs-text); color: var(--vs-white); }
-.btn-delete:hover { border-color: #ef4444; color: #ef4444; }
-.badge-admin { background: var(--vs-white); color: var(--vs-black); padding: 2px 6px; border-radius: 4px; font-size: 10px; font-weight: bold; }
-.alert { padding: 15px; background: rgba(255,255,255,0.05); border: 1px solid var(--vs-border); color: var(--vs-text-light); border-radius: 8px; margin-bottom: 20px; text-align: center; font-weight: bold; }
-.alert-success { background: rgba(255,255,255,0.1); border: 1px solid var(--vs-text); color: var(--vs-white); }
-.tos-list { text-align: left; margin-top: 20px; }
-.tos-item { margin-bottom: 25px; padding-bottom: 15px; border-bottom: 1px solid var(--vs-border); }
-.tos-title { font-family: 'Orbitron'; font-size: 16px; color: var(--vs-white); margin-bottom: 8px; font-weight: bold; }
-.tos-title span { color: var(--vs-text); margin-right: 8px; }
-.tos-desc { font-size: 14px; color: var(--vs-text); line-height: 1.6; }
+const style = `<style>@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&family=Orbitron:wght@400;700;900&display=swap');
+body.mobf-root{--vs-bg:#030303;--vs-card:#0a0a0a;--vs-border:#1f1f1f;--vs-border-hover:#333;--vs-text:#888;--vs-text-light:#e0e0e0;--vs-white:#fff;--vs-black:#000;background:var(--vs-bg);color:var(--vs-text-light);font-family:"JetBrains Mono",monospace;min-height:100vh;margin:0;overflow-x:hidden;position:relative}
+.mobf-root::before{content:"";position:fixed;inset:0;background-image:linear-gradient(rgba(255,255,255,0.02)1px,transparent 1px),linear-gradient(90deg,rgba(255,255,255,0.02)1px,transparent 1px);background-size:40px 40px;animation:gridMove 20s linear infinite;pointer-events:none;z-index:0}
+@keyframes gridMove{to{transform:translateY(40px)}}
+.orb{position:fixed;border-radius:50%;filter:blur(100px);opacity:.03;pointer-events:none;z-index:0;animation:orbFloat 10s ease-in-out infinite}
+.orb1{width:500px;height:500px;background:#fff;top:-100px;left:-100px}
+.orb2{width:450px;height:450px;background:#fff;bottom:-150px;right:-100px;animation-delay:-3s}
+.orb3{width:300px;height:300px;background:#fff;top:40%;left:30%;animation-delay:-6s;opacity:.01}
+@keyframes orbFloat{0%,100%{transform:translate(0,0) scale(1)}50%{transform:translate(30px,-30px) scale(1.1)}}
+.mobf-nav{position:sticky;top:0;z-index:100;display:flex;align-items:center;justify-content:space-between;padding:16px 32px;background:rgba(3,3,3,.85);backdrop-filter:blur(16px);border-bottom:1px solid var(--vs-border)}
+.nav-logo{font-family:Orbitron,sans-serif;font-size:22px;font-weight:900;letter-spacing:2px;color:var(--vs-white);text-decoration:none;display:flex;align-items:center;gap:8px}
+.menu-toggle{font-size:24px;background:0 0;border:none;color:var(--vs-white);cursor:pointer;display:flex;align-items:center}
+.menu-toggle:hover{color:var(--vs-text);transform:scale(1.1)}
+.sidebar{position:fixed;top:0;left:-300px;width:280px;height:100vh;background:#050505;border-right:1px solid var(--vs-border);z-index:999;padding:30px 20px;box-sizing:border-box;transition:all .4s cubic-bezier(.77,0,.175,1);box-shadow:10px 0 30px rgba(0,0,0,.9)}
+.sidebar.active{left:0}
+.sidebar-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:30px;font-family:Orbitron;font-weight:700;color:var(--vs-text-light)}
+.sidebar-close{background:0 0;border:none;color:var(--vs-text);font-size:20px;cursor:pointer;display:flex}
+.sidebar-close:hover{color:var(--vs-white)}
+.sidebar-menu a{display:flex;align-items:center;gap:12px;padding:14px 18px;color:var(--vs-text);text-decoration:none;border-radius:8px;margin-bottom:5px;transition:.3s;font-weight:700}
+.sidebar-menu a i{font-size:18px}
+.sidebar-menu a:hover{background:rgba(255,255,255,.05);color:var(--vs-white)}
+.user-badge{background:rgba(255,255,255,.02);padding:12px;border-radius:8px;font-size:12px;margin-bottom:20px;border:1px solid var(--vs-border);text-align:center;color:var(--vs-text)}
+.hero{position:relative;z-index:1;text-align:center;padding:40px 20px 20px;max-width:860px;margin:0 auto}
+.hero-badge{display:inline-flex;align-items:center;gap:8px;padding:6px 16px;border:1px solid var(--vs-border-hover);border-radius:20px;font-size:11px;letter-spacing:2px;text-transform:uppercase;color:var(--vs-text-light);margin-bottom:20px;background:rgba(255,255,255,.02)}
+.hero h1{font-family:Orbitron,sans-serif;font-size:clamp(26px,5vw,42px);font-weight:900;letter-spacing:2px;margin:0 0 10px;color:var(--vs-white)}
+.center-card-wrap{position:relative;z-index:1;max-width:800px;margin:0 auto 80px;padding:0 20px}
+.quick-card{background:var(--vs-card);border:1px solid var(--vs-border);border-radius:12px;padding:32px;position:relative;overflow:hidden;box-shadow:0 10px 40px rgba(0,0,0,.8)}
+.header-flex{display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;flex-wrap:wrap;gap:10px}
+.field-label{font-size:13px;letter-spacing:2px;text-transform:uppercase;color:var(--vs-text-light);font-weight:700;margin:0 0 10px;display:block}
+.quick-card input[type=text],.quick-card input[type=password]{width:100%;padding:14px;background:var(--vs-black);border:1px solid var(--vs-border);border-radius:8px;color:var(--vs-white);font-family:"JetBrains Mono",monospace;font-size:14px;box-sizing:border-box;outline:0;transition:all .3s;margin-bottom:20px}
+.quick-card input:focus,.quick-card textarea:focus{border-color:var(--vs-text);box-shadow:0 0 15px rgba(255,255,255,.05)}
+.btn-upload{background:rgba(255,255,255,.02);color:var(--vs-text);border:1px dashed var(--vs-border-hover);padding:10px 15px;border-radius:8px;font-size:12px;cursor:pointer;transition:all .3s;font-family:Orbitron;display:inline-flex;align-items:center;gap:8px;font-weight:700}
+.btn-upload:hover{background:rgba(255,255,255,.05);color:var(--vs-white);border-color:var(--vs-text)}
+input[type=file]{display:none}
+.quick-card textarea{width:100%;height:250px;background:var(--vs-black);border:1px solid var(--vs-border);border-radius:8px;color:var(--vs-text-light);font-family:"JetBrains Mono",monospace;font-size:13px;padding:14px;box-sizing:border-box;outline:0;transition:all .3s;resize:none;margin-bottom:15px}
+.btn-save{width:100%;padding:16px;border:none;border-radius:8px;font-family:Orbitron;font-size:15px;font-weight:900;letter-spacing:2px;cursor:pointer;color:var(--vs-black);background:var(--vs-white);transition:all .2s;text-decoration:none;display:flex;align-items:center;justify-content:center;gap:10px;box-sizing:border-box}
+.btn-save:hover{background:var(--vs-text-light);transform:translateY(-2px);box-shadow:0 8px 25px rgba(255,255,255,.15)}
+.result-box{margin-top:15px;padding:20px;border-radius:8px;background:var(--vs-black);border:1px solid var(--vs-border);text-align:left;position:relative}
+.copy-btn{position:absolute;top:10px;right:10px;background:var(--vs-border);color:var(--vs-text-light);border:1px solid var(--vs-border-hover);padding:8px 16px;border-radius:6px;font-size:12px;font-weight:700;cursor:pointer;font-family:Orbitron;transition:.3s}
+.copy-btn:hover{background:var(--vs-white);color:var(--vs-black)}
+.code-preview{color:var(--vs-text-light);word-break:break-all;font-size:13px;line-height:1.5;margin-top:10px;white-space:pre-wrap}
+.manage-wrap{overflow-x:auto;width:100%}
+.manage-table{width:100%;min-width:600px;border-collapse:collapse;margin-top:15px;font-size:13px}
+.manage-table th{background:rgba(255,255,255,.02);color:var(--vs-text-light);padding:12px;text-align:left;border-bottom:1px solid var(--vs-border);font-family:Orbitron}
+.manage-table td{padding:14px 12px;border-bottom:1px solid rgba(255,255,255,.02);vertical-align:middle}
+.btn-action{padding:6px 10px;border:1px solid var(--vs-border);border-radius:6px;font-family:"JetBrains Mono";cursor:pointer;font-weight:700;font-size:11px;text-decoration:none;margin-right:5px;display:inline-flex;align-items:center;gap:6px;margin-bottom:5px;background:var(--vs-black);color:var(--vs-text-light);transition:.2s}
+.btn-action:hover{border-color:var(--vs-text);color:var(--vs-white)}
+.btn-delete:hover{border-color:#ef4444;color:#ef4444}
+.badge-admin{background:var(--vs-white);color:var(--vs-black);padding:2px 6px;border-radius:4px;font-size:10px;font-weight:700}
+.alert{padding:15px;background:rgba(255,255,255,.05);border:1px solid var(--vs-border);color:var(--vs-text-light);border-radius:8px;margin-bottom:20px;text-align:center;font-weight:700}
+.alert-success{background:rgba(255,255,255,.1);border:1px solid var(--vs-text);color:var(--vs-white)}
+.tos-list{text-align:left;margin-top:20px}
+.tos-item{margin-bottom:25px;padding-bottom:15px;border-bottom:1px solid var(--vs-border)}
+.tos-title{font-family:Orbitron;font-size:16px;color:var(--vs-white);margin-bottom:8px;font-weight:700}
+.tos-title span{color:var(--vs-text);margin-right:8px}
+.tos-desc{font-size:14px;color:var(--vs-text);line-height:1.6}
 </style>`;
 
 const baseHTML = (content, userSession = null) => {
   const isAdmin = userSession === 'master1';
-  return `
-<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>VantaShield.com | Protected Hub</title>
-  ${style}
-</head>
-<body class="mobf-root">
-  <div class="orb orb1"></div><div class="orb orb2"></div><div class="orb orb3"></div>
-  
-  <nav class="mobf-nav">
-    <a href="/" class="nav-logo"><i class="ph-fill ph-shield-check"></i> VANTASHIELD.COM</a>
-    <button class="menu-toggle" onclick="toggleSidebar()"><i class="ph ph-list"></i></button>
-  </nav>
-
-  <div class="sidebar" id="sidebarNav">
-    <div class="sidebar-header">
-      <span>NAVIGATION</span>
-      <button class="sidebar-close" onclick="toggleSidebar()"><i class="ph ph-x"></i></button>
+  return `<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>VantaShield.com | Protected Hub</title>${style}</head>
+  <body class="mobf-root"><div class="orb orb1"></div><div class="orb orb2"></div><div class="orb orb3"></div>
+  <nav class="mobf-nav"><a href="/" class="nav-logo"><i class="ph-fill ph-shield-check"></i> VANTASHIELD.COM</a><button class="menu-toggle" onclick="toggleSidebar()"><i class="ph ph-list"></i></button></nav>
+  <div class="sidebar" id="sidebarNav"><div class="sidebar-header"><span>NAVIGATION</span><button class="sidebar-close" onclick="toggleSidebar()"><i class="ph ph-x"></i></button></div>
+  ${userSession ? `
+    <div class="user-badge"><div style="display:flex;justify-content:center;align-items:center;gap:6px;margin-bottom:8px"><i class="ph-fill ph-check-circle" style="color:var(--vs-white)"></i> Logged in as:</div>
+    <b style="color:var(--vs-white);font-size:16px;display:flex;justify-content:center;align-items:center;gap:6px">${escapeHTML(userSession).toUpperCase()} ${isAdmin ? '<i class="ph-fill ph-crown"></i>' : ''}</b></div>
+    <div class="sidebar-menu">
+      <a href="/"><i class="ph ph-house"></i> Creator Home</a>
+      <a href="/dashboard"><i class="ph ph-file-code"></i> Script Management</a>
+      <a href="/api-hosting"><i class="ph ph-cloud-arrow-up"></i> Tạo Web (Hosting)</a>
+      <a href="/ping"><i class="ph ph-pulse"></i> Ping Monitor</a>
+      <a href="/tos"><i class="ph ph-scroll"></i> Terms of Service</a>
+      ${isAdmin ? `<a href="#" id="toggleBlockBtn" style="color:#ff6600"><i class="ph ph-lock-simple"></i> <span id="blockStatus">Khóa toàn bộ (TẮT)</span></a>
+      <a href="/reset-master" style="color:#ef4444"><i class="ph ph-arrow-counter-clockwise"></i> Reset Master IP</a>` : ''}
+      <a href="/logout" style="color:var(--vs-text);margin-top:40px"><i class="ph ph-sign-out"></i> Logout</a>
     </div>
-    ${userSession ? `
-      <div class="user-badge">
-        <div style="display:flex; justify-content:center; align-items:center; gap:6px; margin-bottom:8px;">
-          <i class="ph-fill ph-check-circle" style="color: var(--vs-white);"></i> Logged in as:
-        </div>
-        <b style="color:var(--vs-white); font-size: 16px; display:flex; justify-content:center; align-items:center; gap:6px;">
-          ${escapeHTML(userSession).toUpperCase()} ${isAdmin ? '<i class="ph-fill ph-crown"></i>' : ''}
-        </b>
-      </div>
-      <div class="sidebar-menu">
-        <a href="/"><i class="ph ph-house"></i> Creator Home</a>
-        <a href="/dashboard"><i class="ph ph-file-code"></i> Script Management</a>
+  ` : `
+    <div class="user-badge"><i class="ph-fill ph-x-circle" style="margin-right:6px"></i> Not Logged In</div>
+    <div class="sidebar-menu" style="text-align:center">
+      <p style="font-size:12px;color:var(--vs-text);margin-bottom:15px">Log in to securely save, edit, and manage your scripts globally.</p>
+      <a href="/login" style="background:var(--vs-white);color:var(--vs-black);font-size:13px;margin-bottom:10px;justify-content:center"><i class="ph ph-key"></i> Login</a>
+      <a href="/register" style="background:var(--vs-border);color:var(--vs-white);font-size:13px;margin-bottom:20px;justify-content:center"><i class="ph ph-user-plus"></i> Create Account</a>
+      <div style="border-top:1px solid var(--vs-border);padding-top:10px">
         <a href="/api-hosting"><i class="ph ph-cloud-arrow-up"></i> Tạo Web (Hosting)</a>
-        <a href="/ping"><i class="ph ph-pulse"></i> Ping Monitor</a>
-        <a href="/tos"><i class="ph ph-scroll"></i> Terms of Service</a>
-        ${isAdmin ? `<a href="/reset-master" style="color:#ef4444;"><i class="ph ph-arrow-counter-clockwise"></i> Reset Master IP</a>` : ''}
-        <a href="/logout" style="color: var(--vs-text); margin-top: 40px;"><i class="ph ph-sign-out"></i> Logout</a>
+        <a href="/tos" style="color:var(--vs-text)"><i class="ph ph-scroll"></i> Terms of Service</a>
       </div>
-    ` : `
-      <div class="user-badge">
-        <i class="ph-fill ph-x-circle" style="margin-right:6px;"></i> Not Logged In
-      </div>
-      <div class="sidebar-menu" style="text-align:center;">
-        <p style="font-size:12px; color:var(--vs-text); margin-bottom:15px;">Log in to securely save, edit, and manage your scripts globally.</p>
-        <a href="/login" style="background:var(--vs-white); color:var(--vs-black); font-size:13px; margin-bottom:10px; justify-content:center;"><i class="ph ph-key"></i> Login</a>
-        <a href="/register" style="background:var(--vs-border); color:var(--vs-white); font-size:13px; margin-bottom:20px; justify-content:center;"><i class="ph ph-user-plus"></i> Create Account</a>
-        <div style="border-top: 1px solid var(--vs-border); padding-top: 10px;">
-          <a href="/api-hosting"><i class="ph ph-cloud-arrow-up"></i> Tạo Web (Hosting)</a>
-          <a href="/tos" style="color:var(--vs-text);"><i class="ph ph-scroll"></i> Terms of Service</a>
-        </div>
-      </div>
-    `}
-  </div>
-
+    </div>
+  `}</div>
   <main>${content}</main>
   <script>
-    function toggleSidebar() { document.getElementById('sidebarNav').classList.toggle('active'); }
-    function handleFileUpload(event) {
-      const file = event.target.files[0];
-      if (!file) return;
-      const reader = new FileReader();
-      reader.onload = function(e) { document.getElementById('codeArea').value = e.target.result; };
-      reader.readAsText(file);
-    }
-    function copyText(elementId, btnElement) {
-      const textToCopy = document.getElementById(elementId).innerText;
-      const textArea = document.createElement("textarea");
-      textArea.value = textToCopy; document.body.appendChild(textArea); textArea.select();
-      try {
-        document.execCommand('copy');
-        btnElement.innerHTML = '<i class="ph ph-check"></i> COPIED!'; 
-        btnElement.style.background = 'var(--vs-white)'; btnElement.style.color = 'var(--vs-black)';
-        setTimeout(() => { btnElement.innerHTML = '<i class="ph ph-copy"></i> COPY'; btnElement.style.background = 'var(--vs-border)'; btnElement.style.color = 'var(--vs-text-light)'; }, 2000);
-      } catch(err) {}
-      document.body.removeChild(textArea);
-    }
-    function copyApiLink(projectName, btnElement) {
-      const url = window.location.origin + '/app/' + projectName;
-      const textArea = document.createElement("textarea");
-      textArea.value = url; document.body.appendChild(textArea); textArea.select();
-      try {
-        document.execCommand('copy');
-        btnElement.innerHTML = '<i class="ph ph-check"></i> COPIED!'; 
-        btnElement.style.borderColor = 'var(--vs-white)'; btnElement.style.color = 'var(--vs-white)';
-        setTimeout(() => { btnElement.innerHTML = '<i class="ph ph-copy"></i> COPY LINK'; btnElement.style.borderColor = 'var(--vs-border)'; btnElement.style.color = 'var(--vs-text-light)'; }, 2000);
-      } catch(e) {}
-      document.body.removeChild(textArea);
-    }
-    function openApiLink(projectName) {
-      window.open(window.location.origin + '/app/' + projectName, '_blank');
-    }
-  </script>
-  <script src="https://unpkg.com/@phosphor-icons/web"></script>
-</body>
-</html>
-`;
+    function toggleSidebar(){document.getElementById('sidebarNav').classList.toggle('active')}
+    function handleFileUpload(e){const f=e.target.files[0];if(!f)return;const r=new FileReader();r.onload=function(e){document.getElementById('codeArea').value=e.target.result};r.readAsText(f)}
+    function copyText(id,btn){const t=document.getElementById(id).innerText;const ta=document.createElement('textarea');ta.value=t;document.body.appendChild(ta);ta.select();try{document.execCommand('copy');btn.innerHTML='<i class="ph ph-check"></i> COPIED!';btn.style.background='var(--vs-white)';btn.style.color='var(--vs-black)';setTimeout(()=>{btn.innerHTML='<i class="ph ph-copy"></i> COPY';btn.style.background='var(--vs-border)';btn.style.color='var(--vs-text-light)'},2000)}catch(e){}document.body.removeChild(ta)}
+    function copyApiLink(name,btn){const url=window.location.origin+'/app/'+name;const ta=document.createElement('textarea');ta.value=url;document.body.appendChild(ta);ta.select();try{document.execCommand('copy');btn.innerHTML='<i class="ph ph-check"></i> COPIED!';btn.style.borderColor='var(--vs-white)';btn.style.color='var(--vs-white)';setTimeout(()=>{btn.innerHTML='<i class="ph ph-copy"></i> COPY LINK';btn.style.borderColor='var(--vs-border)';btn.style.color='var(--vs-text-light)'},2000)}catch(e){}document.body.removeChild(ta)}
+    function openApiLink(name){window.open(window.location.origin+'/app/'+name,'_blank')}
+    ${isAdmin ? `
+    document.addEventListener('DOMContentLoaded',function(){const btn=document.getElementById('toggleBlockBtn');const statusSpan=document.getElementById('blockStatus');if(!btn)return;fetch('/toggle-block',{method:'POST'}).then(r=>r.json()).then(data=>{statusSpan.textContent=data.blocked?'Khóa toàn bộ (BẬT)':'Khóa toàn bộ (TẮT)';btn.style.color=data.blocked?'#ff4444':'#ff6600'}).catch(()=>{});btn.addEventListener('click',function(e){e.preventDefault();fetch('/toggle-block',{method:'POST'}).then(r=>r.json()).then(data=>{statusSpan.textContent=data.blocked?'Khóa toàn bộ (BẬT)':'Khóa toàn bộ (TẮT)';btn.style.color=data.blocked?'#ff4444':'#ff6600';alert(data.blocked?'🔒 Đã khóa toàn bộ! Các IP khác sẽ bị chặn ngay lập tức.':'🔓 Đã mở khóa. Các IP khác có thể truy cập.')}).catch(()=>alert('Lỗi khi gửi yêu cầu.'))})});
+    ` : ''}
+  </script><script src="https://unpkg.com/@phosphor-icons/web"></script></body></html>`;
 };
 
 // ============================================================================
-// TẠO WEB HOSTING PROXY (rút gọn nhưng đủ chức năng)
+// TẤT CẢ CÁC ROUTE CHỨC NĂNG (Hosting, Ping, Dashboard, Raw, v.v...)
+// (Đã được tích hợp sẵn, giữ nguyên từ phiên bản trước)
 // ============================================================================
+
+// ===== TẠO WEB HOSTING PROXY =====
 app.get('/api-hosting', (req, res) => {
   const user = getCookie(req, 'user_session');
   if (!user) return res.redirect('/login?error=Bạn cần đăng nhập để sử dụng API Hosting.');
@@ -464,95 +482,36 @@ app.get('/api-hosting', (req, res) => {
     if (isAdmin || val.owner === user) {
       const statusColor = val.status === 'ONLINE' ? 'var(--vs-white)' : 'var(--vs-text)';
       const statusIcon = val.status === 'ONLINE' ? '<i class="ph-fill ph-check-circle"></i>' : '<i class="ph-fill ph-x-circle"></i>';
-      rowsHtml += `
-        <tr>
-          <td style="color:var(--vs-white); font-weight:bold;">${escapeHTML(val.name)}</td>
-          ${isAdmin ? `<td><span class="badge-admin">${val.owner.toUpperCase()}</span></td>` : ''}
-          <td><span style="color: ${statusColor}; font-weight: bold; display:flex; align-items:center; gap:6px;">${statusIcon} ${val.status}</span></td>
-          <td style="color:var(--vs-text); font-family:'JetBrains Mono';">/app/${val.name}</td>
-          <td>
-            ${val.status === 'ONLINE' ? `
-              <button class="btn-action" onclick="openApiLink('${val.name}')"><i class="ph ph-arrow-square-out"></i> MỞ WEB</button>
-              <button class="btn-action" onclick="copyApiLink('${val.name}', this)"><i class="ph ph-copy"></i> COPY LINK</button>
-              <form action="/api-action/stop/${key}" method="POST" style="display:inline;"><button type="submit" class="btn-action"><i class="ph ph-stop-circle"></i> STOP</button></form>
-            ` : `
-              <form action="/api-action/start/${key}" method="POST" style="display:inline;"><button type="submit" class="btn-action" style="color:var(--vs-white); border-color:var(--vs-text);"><i class="ph ph-play-circle"></i> START</button></form>
-            `}
-            <form action="/api-action/delete/${key}" method="POST" style="display:inline;" onsubmit="return confirm('Bạn có chắc muốn xóa Web này vĩnh viễn?');"><button type="submit" class="btn-action btn-delete"><i class="ph ph-trash"></i> XÓA</button></form>
-          </td>
-        </tr>
-      `;
+      rowsHtml += `<tr><td style="color:var(--vs-white);font-weight:bold">${escapeHTML(val.name)}</td>
+        ${isAdmin ? `<td><span class="badge-admin">${val.owner.toUpperCase()}</span></td>` : ''}
+        <td><span style="color:${statusColor};font-weight:bold;display:flex;align-items:center;gap:6px">${statusIcon} ${val.status}</span></td>
+        <td style="color:var(--vs-text);font-family:'JetBrains Mono'">/app/${val.name}</td>
+        <td>${val.status === 'ONLINE' ? `
+          <button class="btn-action" onclick="openApiLink('${val.name}')"><i class="ph ph-arrow-square-out"></i> MỞ WEB</button>
+          <button class="btn-action" onclick="copyApiLink('${val.name}', this)"><i class="ph ph-copy"></i> COPY LINK</button>
+          <form action="/api-action/stop/${key}" method="POST" style="display:inline"><button type="submit" class="btn-action"><i class="ph ph-stop-circle"></i> STOP</button></form>
+        ` : `
+          <form action="/api-action/start/${key}" method="POST" style="display:inline"><button type="submit" class="btn-action" style="color:var(--vs-white);border-color:var(--vs-text)"><i class="ph ph-play-circle"></i> START</button></form>
+        `}
+        <form action="/api-action/delete/${key}" method="POST" style="display:inline" onsubmit="return confirm('Bạn có chắc muốn xóa Web này vĩnh viễn?');"><button type="submit" class="btn-action btn-delete"><i class="ph ph-trash"></i> XÓA</button></form></td></tr>`;
     }
   });
   const msg = req.query.msg;
   res.send(baseHTML(`
-    <section class="hero">
-      <div class="hero-badge"><i class="ph ph-cloud"></i> VANTASHIELD CLOUD PLATFORM</div>
-      <h1><span class="line2">TẠO WEB (HOSTING)</span></h1>
-    </section>
+    <section class="hero"><div class="hero-badge"><i class="ph ph-cloud"></i> VANTASHIELD CLOUD PLATFORM</div><h1><span class="line2">TẠO WEB (HOSTING)</span></h1></section>
     ${msg ? `<div class="center-card-wrap"><div class="alert alert-success"><i class="ph-fill ph-check-circle"></i> ${escapeHTML(msg)}</div></div>` : ''}
-    <div class="center-card-wrap" style="max-width: 1000px; display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 20px;">
-      <div class="quick-card" style="padding:25px;">
-        <div class="field-label" style="color: var(--vs-white); font-size: 15px; text-align:center;">
-          <i class="ph ph-github-logo" style="font-size:28px; display:block; margin-bottom:8px;"></i> DEPLOY TỪ GITHUB
-        </div>
-        <form id="githubForm" onsubmit="handleAjaxDeploy(event, 'github')">
-          <label class="field-label">TÊN DỰ ÁN</label>
-          <input type="text" name="project_name" placeholder="my-github-web" required pattern="[a-z0-9-]+">
-          <label class="field-label">LINK KHO GITHUB</label>
-          <input type="text" name="repo_url" placeholder="https://github.com/user/repo.git" required>
-          <button type="submit" class="btn-save" style="margin-top:10px;"><i class="ph ph-rocket-launch"></i> DEPLOY</button>
-        </form>
-      </div>
-      <div class="quick-card" style="padding:25px;">
-        <div class="field-label" style="color: var(--vs-white); font-size: 15px; text-align:center;">
-          <i class="ph ph-terminal-window" style="font-size:28px; display:block; margin-bottom:8px;"></i> TẠO TRỰC TIẾP
-        </div>
-        <form id="manualForm" onsubmit="handleAjaxDeploy(event, 'manual')">
-          <label class="field-label">TÊN DỰ ÁN</label>
-          <input type="text" name="project_name" placeholder="my-local-web" required pattern="[a-z0-9-]+">
-          <label class="field-label">package.json</label>
-          <textarea name="pkg_json" style="height:80px; font-family:monospace;">{"name":"my-web","version":"1.0.0","main":"server.js","dependencies":{"express":"^4.19.2"}}</textarea>
-          <label class="field-label">server.js</label>
-          <textarea name="srv_js" style="height:120px; font-family:monospace;">const express=require('express');const app=express();app.get('/',(req,res)=>res.send('<h1>Web thành công!</h1>'));app.listen(process.env.PORT||3000);</textarea>
-          <button type="submit" class="btn-save"><i class="ph ph-hammer"></i> TẠO WEB</button>
-        </form>
-      </div>
+    <div class="center-card-wrap" style="max-width:1000px;display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:20px">
+      <div class="quick-card" style="padding:25px"><div class="field-label" style="color:var(--vs-white);font-size:15px;text-align:center"><i class="ph ph-github-logo" style="font-size:28px;display:block;margin-bottom:8px"></i> DEPLOY TỪ GITHUB</div>
+      <form id="githubForm" onsubmit="handleAjaxDeploy(event,'github')"><label class="field-label">TÊN DỰ ÁN</label><input type="text" name="project_name" placeholder="my-github-web" required pattern="[a-z0-9-]+"><label class="field-label">LINK KHO GITHUB</label><input type="text" name="repo_url" placeholder="https://github.com/user/repo.git" required><button type="submit" class="btn-save" style="margin-top:10px"><i class="ph ph-rocket-launch"></i> DEPLOY</button></form></div>
+      <div class="quick-card" style="padding:25px"><div class="field-label" style="color:var(--vs-white);font-size:15px;text-align:center"><i class="ph ph-terminal-window" style="font-size:28px;display:block;margin-bottom:8px"></i> TẠO TRỰC TIẾP</div>
+      <form id="manualForm" onsubmit="handleAjaxDeploy(event,'manual')"><label class="field-label">TÊN DỰ ÁN</label><input type="text" name="project_name" placeholder="my-local-web" required pattern="[a-z0-9-]+"><label class="field-label">package.json</label><textarea name="pkg_json" style="height:80px;font-family:monospace">{"name":"my-web","version":"1.0.0","main":"server.js","dependencies":{"express":"^4.19.2"}}</textarea><label class="field-label">server.js</label><textarea name="srv_js" style="height:120px;font-family:monospace">const express=require('express');const app=express();app.get('/',(req,res)=>res.send('<h1>Web thành công!</h1>'));app.listen(process.env.PORT||3000);</textarea><button type="submit" class="btn-save"><i class="ph ph-hammer"></i> TẠO WEB</button></form></div>
     </div>
-    <div class="center-card-wrap" style="max-width:1000px;">
-      <div class="quick-card">
-        <div class="field-label"><i class="ph ph-hard-drives"></i> CÁC WEB CỦA BẠN</div>
-        <div class="manage-wrap">
-          <table class="manage-table">
-            <thead><tr><th>TÊN</th>${isAdmin?'<th>CHỦ SỞ HỮU</th>':''}<th>TRẠNG THÁI</th><th>ĐƯỜNG DẪN</th><th>HÀNH ĐỘNG</th></tr></thead>
-            <tbody>${rowsHtml || `<tr><td colspan="${isAdmin?5:4}" style="text-align:center;padding:20px;color:var(--vs-text);">Chưa có web nào.</td></tr>`}</tbody>
-          </table>
-        </div>
-      </div>
-    </div>
-    <script>
-      async function handleAjaxDeploy(e,type) {
-        e.preventDefault();
-        const form=e.target, data=Object.fromEntries(new FormData(form));
-        const overlay=document.getElementById('loader-overlay'), term=document.getElementById('term-body');
-        overlay.style.display='flex'; term.innerHTML='';
-        const appendTerm=(text,delay=0)=>new Promise(r=>setTimeout(()=>{let p=document.createElement('div');p.className='term-line';p.innerHTML=text;term.appendChild(p);r();},delay));
-        await appendTerm('> Đang xử lý...',500);
-        let endpoint=type==='github'?'/api-deploy-github-ajax':'/api-deploy-ajax';
-        try {
-          const res=await fetch(endpoint,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});
-          const result=await res.json();
-          if(result.success){
-            await appendTerm('<span style="color:var(--vs-white);">[ THÀNH CÔNG ]</span>',0);
-            await appendTerm('Link proxy: '+window.location.origin+'/app/'+result.name,500);
-            setTimeout(()=>window.location.href='/api-hosting?msg=Tạo web thành công!',2500);
-          } else await appendTerm('<span style="color:#ef4444;">[ LỖI ] '+result.message+'</span>');
-        } catch(err){ await appendTerm('<span style="color:#ef4444;">Lỗi kết nối.</span>'); }
-      }
-    </script>
+    <div class="center-card-wrap" style="max-width:1000px"><div class="quick-card"><div class="field-label"><i class="ph ph-hard-drives"></i> CÁC WEB CỦA BẠN</div><div class="manage-wrap"><table class="manage-table"><thead><tr><th>TÊN</th>${isAdmin?'<th>CHỦ SỞ HỮU</th>':''}<th>TRẠNG THÁI</th><th>ĐƯỜNG DẪN</th><th>HÀNH ĐỘNG</th></tr></thead><tbody>${rowsHtml || '<tr><td colspan="'+(isAdmin?5:4)+'" style="text-align:center;padding:20px;color:var(--vs-text)">Chưa có web nào.</td></tr>'}</tbody></table></div></div></div>
+    <script>async function handleAjaxDeploy(e,type){e.preventDefault();const form=e.target,data=Object.fromEntries(new FormData(form));const overlay=document.getElementById('loader-overlay'),term=document.getElementById('term-body');overlay.style.display='flex';term.innerHTML='';const appendTerm=(text,delay=0)=>new Promise(r=>setTimeout(()=>{let p=document.createElement('div');p.className='term-line';p.innerHTML=text;term.appendChild(p);r();},delay));await appendTerm('> Đang xử lý...',500);let endpoint=type==='github'?'/api-deploy-github-ajax':'/api-deploy-ajax';try{const res=await fetch(endpoint,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});const result=await res.json();if(result.success){await appendTerm('<span style="color:var(--vs-white)">[ THÀNH CÔNG ]</span>',0);await appendTerm('Link proxy: '+window.location.origin+'/app/'+result.name,500);setTimeout(()=>window.location.href='/api-hosting?msg=Tạo web thành công!',2500)}else await appendTerm('<span style="color:#ef4444">[ LỖI ] '+result.message+'</span>')}catch(err){await appendTerm('<span style="color:#ef4444">Lỗi kết nối.</span>')}}</script>
   `, user));
 });
 
+// ===== CÁC API DEPLOY =====
 app.post('/api-deploy-ajax', async (req, res) => {
   const user = getCookie(req, 'user_session');
   if (!user) return res.json({ success: false, message: 'Chưa đăng nhập.' });
@@ -659,9 +618,7 @@ app.post('/api-action/:action/:id', (req, res) => {
   res.redirect('/api-hosting');
 });
 
-// ============================================================================
-// PING MONITOR
-// ============================================================================
+// ===== PING MONITOR =====
 async function doFetch(url) {
   const fetchFn = global.fetch || (await import('node-fetch')).default;
   return fetchFn(url, { method: 'GET', headers: { 'User-Agent': 'VantaShield-Ping/1.0' }, redirect: 'follow' });
@@ -704,35 +661,12 @@ app.get('/ping', (req, res) => {
     const status = m.lastOk ? 'ONLINE' : (m.lastCheck ? 'DOWN' : 'PENDING');
     const color = m.lastOk ? 'var(--vs-white)' : (m.lastCheck ? '#ef4444' : 'var(--vs-text)');
     const uptime = m.totalPings ? Math.round((m.successCount||0)/m.totalPings*100) : 0;
-    return `<tr>
-      <td style="font-family:'JetBrains Mono';">${escapeHTML(m.url)}</td>
-      <td><span style="color:${color};font-weight:bold;">${status} ${m.lastStatus?'('+m.lastStatus+')':''}</span></td>
-      <td>${m.lastTime||0}ms</td>
-      <td>${uptime}% (${m.successCount||0}/${m.totalPings||0})</td>
-      <td>${m.lastCheck?new Date(m.lastCheck).toLocaleTimeString():'-'}</td>
-      <td><form action="/ping/delete/${m.id}" method="POST" style="display:inline;"><button class="btn-action btn-delete"><i class="ph ph-trash"></i> XÓA</button></form></td>
-    </tr>`;
+    return `<tr><td style="font-family:'JetBrains Mono'">${escapeHTML(m.url)}</td><td><span style="color:${color};font-weight:bold">${status} ${m.lastStatus?'('+m.lastStatus+')':''}</span></td><td>${m.lastTime||0}ms</td><td>${uptime}% (${m.successCount||0}/${m.totalPings||0})</td><td>${m.lastCheck?new Date(m.lastCheck).toLocaleTimeString():'-'}</td><td><form action="/ping/delete/${m.id}" method="POST" style="display:inline"><button class="btn-action btn-delete"><i class="ph ph-trash"></i> XÓA</button></form></td></tr>`;
   }).join('');
   res.send(baseHTML(`
     <section class="hero"><div class="hero-badge"><i class="ph ph-pulse"></i> UPTIME MONITOR</div><h1><span class="line2">PING MONITOR</span></h1></section>
-    <div class="center-card-wrap" style="max-width:1000px;">
-      <div class="quick-card">
-        <form action="/ping/add" method="POST">
-          <label class="field-label"><i class="ph ph-link"></i> URL CẦN PING</label>
-          <input type="text" name="url" placeholder="https://example.com" required>
-          <button type="submit" class="btn-save"><i class="ph ph-plus-circle"></i> THÊM</button>
-        </form>
-      </div>
-      <div class="quick-card" style="margin-top:20px;">
-        <div class="field-label"><i class="ph ph-list-checks"></i> DANH SÁCH URL</div>
-        <div class="manage-wrap">
-          <table class="manage-table">
-            <thead><tr><th>URL</th><th>STATUS</th><th>THỜI GIAN</th><th>UPTIME</th><th>PING GẦN NHẤT</th><th>HÀNH ĐỘNG</th></tr></thead>
-            <tbody>${rows || '<tr><td colspan="6" style="text-align:center;padding:20px;color:var(--vs-text);">Chưa có URL nào.</td></tr>'}</tbody>
-          </table>
-        </div>
-      </div>
-    </div>
+    <div class="center-card-wrap" style="max-width:1000px"><div class="quick-card"><form action="/ping/add" method="POST"><label class="field-label"><i class="ph ph-link"></i> URL CẦN PING</label><input type="text" name="url" placeholder="https://example.com" required><button type="submit" class="btn-save"><i class="ph ph-plus-circle"></i> THÊM</button></form></div>
+    <div class="quick-card" style="margin-top:20px"><div class="field-label"><i class="ph ph-list-checks"></i> DANH SÁCH URL</div><div class="manage-wrap"><table class="manage-table"><thead><tr><th>URL</th><th>STATUS</th><th>THỜI GIAN</th><th>UPTIME</th><th>PING GẦN NHẤT</th><th>HÀNH ĐỘNG</th></tr></thead><tbody>${rows || '<tr><td colspan="6" style="text-align:center;padding:20px;color:var(--vs-text)">Chưa có URL nào.</td></tr>'}</tbody></table></div></div></div>
     <script>setTimeout(()=>location.reload(),10000);</script>
   `, user));
 });
@@ -759,30 +693,12 @@ app.post('/ping/delete/:id', (req, res) => {
   res.redirect('/ping');
 });
 
-// ============================================================================
-// CÁC ROUTE CHÍNH (HOME, DASHBOARD, LOGIN, REGISTER, TOS, RAW)
-// ============================================================================
+// ===== CÁC ROUTE CHÍNH =====
 app.get('/', (req, res) => {
   const user = getCookie(req, 'user_session');
   res.send(baseHTML(`
-    <section class="hero">
-      <div class="hero-badge"><i class="ph-fill ph-shield-check"></i> BRAND NEW RAW SYSTEM WITH ANTI-SKID</div>
-      <h1><span class="line2">RAW HUB CODESHARE</span></h1>
-    </section>
-    <div class="center-card-wrap">
-      <div class="quick-card">
-        <form action="/create" method="POST">
-          <div class="header-flex">
-            <label class="field-label"><i class="ph ph-file-code"></i> SCRIPT CONTENT (LUA / TXT)</label>
-            <label class="btn-upload"><i class="ph ph-upload-simple"></i> UPLOAD FILE...<input type="file" accept=".lua,.txt,.luau,.js" onchange="handleFileUpload(event)"></label>
-          </div>
-          <textarea id="codeArea" name="code" placeholder="-- Type your script here..." required></textarea>
-          <label class="field-label" style="margin-top:15px;"><i class="ph ph-text-t"></i> CUSTOM FILE NAME (OPTIONAL)</label>
-          <input type="text" name="fileName" placeholder="auto-farm" pattern="[a-zA-Z0-9-_]+">
-          <button type="submit" class="btn-save"><i class="ph-fill ph-lock-key"></i> SECURE & GENERATE RAW LINK</button>
-        </form>
-      </div>
-    </div>
+    <section class="hero"><div class="hero-badge"><i class="ph-fill ph-shield-check"></i> BRAND NEW RAW SYSTEM WITH ANTI-SKID</div><h1><span class="line2">RAW HUB CODESHARE</span></h1></section>
+    <div class="center-card-wrap"><div class="quick-card"><form action="/create" method="POST"><div class="header-flex"><label class="field-label"><i class="ph ph-file-code"></i> SCRIPT CONTENT (LUA / TXT)</label><label class="btn-upload"><i class="ph ph-upload-simple"></i> UPLOAD FILE...<input type="file" accept=".lua,.txt,.luau,.js" onchange="handleFileUpload(event)"></label></div><textarea id="codeArea" name="code" placeholder="-- Type your script here..." required></textarea><label class="field-label" style="margin-top:15px"><i class="ph ph-text-t"></i> CUSTOM FILE NAME (OPTIONAL)</label><input type="text" name="fileName" placeholder="auto-farm" pattern="[a-zA-Z0-9-_]+"><button type="submit" class="btn-save"><i class="ph-fill ph-lock-key"></i> SECURE & GENERATE RAW LINK</button></form></div></div>
   `, user));
 });
 
@@ -800,16 +716,7 @@ app.post('/create', (req, res) => {
   const loadstringCommand = `loadstring(game:HttpGet("${rawLink}"))()`;
   res.send(baseHTML(`
     <section class="hero"><h1><span class="line2">RAW GENERATED!</span></h1></section>
-    <div class="center-card-wrap" style="max-width:650px;">
-      <div class="quick-card">
-        <div class="result-box">
-          <div style="font-size:11px;color:var(--vs-text);"><i class="ph ph-terminal"></i> EXECUTOR LOADSTRING:</div>
-          <button type="button" class="copy-btn" onclick="copyText('loadstring-text', this)"><i class="ph ph-copy"></i> COPY</button>
-          <div class="code-preview" id="loadstring-text">${loadstringCommand}</div>
-        </div>
-        <br><a href="/" class="btn-save" style="background:var(--vs-black);color:var(--vs-text-light);border:1px solid var(--vs-border);"><i class="ph ph-plus"></i> CREATE ANOTHER</a>
-      </div>
-    </div>
+    <div class="center-card-wrap" style="max-width:650px"><div class="quick-card"><div class="result-box"><div style="font-size:11px;color:var(--vs-text)"><i class="ph ph-terminal"></i> EXECUTOR LOADSTRING:</div><button type="button" class="copy-btn" onclick="copyText('loadstring-text', this)"><i class="ph ph-copy"></i> COPY</button><div class="code-preview" id="loadstring-text">${loadstringCommand}</div></div><br><a href="/" class="btn-save" style="background:var(--vs-black);color:var(--vs-text-light);border:1px solid var(--vs-border)"><i class="ph ph-plus"></i> CREATE ANOTHER</a></div></div>
   `, user === 'guest_anonymous' ? null : user));
 });
 
@@ -817,21 +724,9 @@ app.get('/register', (req, res) => {
   const error = req.query.error;
   res.send(baseHTML(`
     <section class="hero"><h1><span class="line2">CREATE NEW ACCOUNT</span></h1></section>
-    <div class="center-card-wrap" style="max-width:450px;">
-      <div class="quick-card">
-        ${error ? `<div class="alert"><i class="ph-fill ph-warning"></i> ${escapeHTML(error)}</div>` : ''}
-        <form action="/register" method="POST">
-          <label class="field-label"><i class="ph ph-user"></i> USERNAME</label>
-          <input type="text" name="username" placeholder="Enter username..." required minlength="3">
-          <label class="field-label"><i class="ph ph-lock-key"></i> PASSWORD</label>
-          <input type="password" name="password" placeholder="Enter password..." required minlength="4">
-          <button type="submit" class="btn-save" style="margin-top:10px;"><i class="ph ph-user-plus"></i> REGISTER NOW</button>
-        </form>
-        <div style="text-align:center;margin-top:20px;font-size:13px;color:var(--vs-text);">
-          Already have an account? <a href="/login" style="color:var(--vs-white);font-weight:bold;">Login here</a>
-        </div>
-      </div>
-    </div>
+    <div class="center-card-wrap" style="max-width:450px"><div class="quick-card">${error ? `<div class="alert"><i class="ph-fill ph-warning"></i> ${escapeHTML(error)}</div>` : ''}
+    <form action="/register" method="POST"><label class="field-label"><i class="ph ph-user"></i> USERNAME</label><input type="text" name="username" placeholder="Enter username..." required minlength="3"><label class="field-label"><i class="ph ph-lock-key"></i> PASSWORD</label><input type="password" name="password" placeholder="Enter password..." required minlength="4"><button type="submit" class="btn-save" style="margin-top:10px"><i class="ph ph-user-plus"></i> REGISTER NOW</button></form>
+    <div style="text-align:center;margin-top:20px;font-size:13px;color:var(--vs-text)">Already have an account? <a href="/login" style="color:var(--vs-white);font-weight:bold">Login here</a></div></div></div>
   `));
 });
 
@@ -849,22 +744,9 @@ app.get('/login', (req, res) => {
   const success = req.query.success;
   res.send(baseHTML(`
     <section class="hero"><h1><span class="line2">SYSTEM LOGIN</span></h1></section>
-    <div class="center-card-wrap" style="max-width:450px;">
-      <div class="quick-card">
-        ${error ? `<div class="alert"><i class="ph-fill ph-warning"></i> ${escapeHTML(error)}</div>` : ''}
-        ${success ? `<div class="alert alert-success"><i class="ph-fill ph-check-circle"></i> ${escapeHTML(success)}</div>` : ''}
-        <form action="/login" method="POST">
-          <label class="field-label"><i class="ph ph-user"></i> USERNAME</label>
-          <input type="text" name="username" placeholder="Enter username..." required>
-          <label class="field-label"><i class="ph ph-lock-key"></i> PASSWORD</label>
-          <input type="password" name="password" placeholder="Enter password..." required>
-          <button type="submit" class="btn-save" style="margin-top:10px;"><i class="ph ph-sign-in"></i> ACCESS SYSTEM</button>
-        </form>
-        <div style="text-align:center;margin-top:20px;font-size:13px;color:var(--vs-text);">
-          Don't have an account? <a href="/register" style="color:var(--vs-white);font-weight:bold;">Register here</a>
-        </div>
-      </div>
-    </div>
+    <div class="center-card-wrap" style="max-width:450px"><div class="quick-card">${error ? `<div class="alert"><i class="ph-fill ph-warning"></i> ${escapeHTML(error)}</div>` : ''}${success ? `<div class="alert alert-success"><i class="ph-fill ph-check-circle"></i> ${escapeHTML(success)}</div>` : ''}
+    <form action="/login" method="POST"><label class="field-label"><i class="ph ph-user"></i> USERNAME</label><input type="text" name="username" placeholder="Enter username..." required><label class="field-label"><i class="ph ph-lock-key"></i> PASSWORD</label><input type="password" name="password" placeholder="Enter password..." required><button type="submit" class="btn-save" style="margin-top:10px"><i class="ph ph-sign-in"></i> ACCESS SYSTEM</button></form>
+    <div style="text-align:center;margin-top:20px;font-size:13px;color:var(--vs-text)">Don't have an account? <a href="/register" style="color:var(--vs-white);font-weight:bold">Register here</a></div></div></div>
   `));
 });
 
@@ -896,31 +778,12 @@ app.get('/dashboard', (req, res) => {
     const age = now - (val.createdAt || now);
     if (val.owner === 'master1' && age > SEVEN_DAYS) return;
     if (isAdmin || val.owner === user) {
-      rows += `<tr>
-        <td style="font-weight:bold;font-family:'JetBrains Mono';">${val.fileName || key}</td>
-        ${isAdmin ? `<td><span class="badge-admin">${val.owner.toUpperCase()}</span></td>` : ''}
-        <td style="max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHTML(val.code.substring(0,35))}...</td>
-        <td>
-          <a href="/edit/${key}" class="btn-action"><i class="ph ph-pencil-simple"></i> EDIT</a>
-          <a href="/delete/${key}" class="btn-action btn-delete" onclick="return confirm('Confirm delete?')"><i class="ph ph-trash"></i> DEL</a>
-          ${isAdmin ? `<a href="/download/${key}" class="btn-action"><i class="ph ph-download-simple"></i> DL</a>` : ''}
-        </td>
-      </tr>`;
+      rows += `<tr><td style="font-weight:bold;font-family:'JetBrains Mono'">${val.fileName || key}</td>${isAdmin ? `<td><span class="badge-admin">${val.owner.toUpperCase()}</span></td>` : ''}<td style="max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHTML(val.code.substring(0,35))}...</td><td><a href="/edit/${key}" class="btn-action"><i class="ph ph-pencil-simple"></i> EDIT</a><a href="/delete/${key}" class="btn-action btn-delete" onclick="return confirm('Confirm delete?')"><i class="ph ph-trash"></i> DEL</a>${isAdmin ? `<a href="/download/${key}" class="btn-action"><i class="ph ph-download-simple"></i> DL</a>` : ''}</td></tr>`;
     }
   });
   res.send(baseHTML(`
     <section class="hero"><h1><span class="line2">${isAdmin ? 'MASTER DASHBOARD' : 'SCRIPT MANAGEMENT'}</span></h1></section>
-    <div class="center-card-wrap" style="max-width:900px;">
-      <div class="quick-card">
-        <div class="field-label"><i class="ph ph-folder-open"></i> ${isAdmin ? 'ALL SYSTEM SCRIPTS' : `CODES FOR [${escapeHTML(user.toUpperCase())}]:`}</div>
-        <div class="manage-wrap">
-          <table class="manage-table">
-            <thead><tr><th>SCRIPT ID / NAME</th>${isAdmin?'<th>OWNER</th>':''}<th>PREVIEW</th><th>ACTIONS</th></tr></thead>
-            <tbody>${rows || `<tr><td colspan="${isAdmin?4:3}" style="text-align:center;padding:20px;color:var(--vs-text);">No scripts found.</td></tr>`}</tbody>
-          </table>
-        </div>
-      </div>
-    </div>
+    <div class="center-card-wrap" style="max-width:900px"><div class="quick-card"><div class="field-label"><i class="ph ph-folder-open"></i> ${isAdmin ? 'ALL SYSTEM SCRIPTS' : `CODES FOR [${escapeHTML(user.toUpperCase())}]:`}</div><div class="manage-wrap"><table class="manage-table"><thead><tr><th>SCRIPT ID / NAME</th>${isAdmin?'<th>OWNER</th>':''}<th>PREVIEW</th><th>ACTIONS</th></tr></thead><tbody>${rows || `<tr><td colspan="${isAdmin?4:3}" style="text-align:center;padding:20px;color:var(--vs-text)">No scripts found.</td></tr>`}</tbody></table></div></div></div>
   `, user));
 });
 
@@ -948,27 +811,9 @@ app.get('/edit/:id', (req, res) => {
   const loadstringCommand = `loadstring(game:HttpGet("${rawLink}"))()`;
   res.send(baseHTML(`
     <section class="hero"><h1><span class="line2">EDIT SCRIPT [${id}]</span></h1></section>
-    <div class="center-card-wrap">
-      <div class="quick-card">
-        <div class="result-box" style="margin-top:0;margin-bottom:25px;">
-          <div style="font-size:11px;color:var(--vs-white);font-weight:bold;font-family:'Orbitron';">LOADSTRING COMMAND:</div>
-          <button type="button" class="copy-btn" onclick="copyText('loadstring-text-edit', this)"><i class="ph ph-copy"></i> COPY</button>
-          <div class="code-preview" id="loadstring-text-edit" style="color:#fff;">${loadstringCommand}</div>
-        </div>
-        <form action="/edit/${id}" method="POST">
-          <div style="background:rgba(255,255,255,0.02);padding:15px;border-radius:8px;border:1px solid var(--vs-border);margin-bottom:20px;">
-            <label class="field-label"><i class="ph ph-upload-simple"></i> UPLOAD NEW FILE</label>
-            <label class="btn-upload" style="background:var(--vs-white);color:var(--vs-black);border:none;">
-              <i class="ph ph-folder-open"></i> SELECT FILE...
-              <input type="file" accept=".lua,.txt,.luau,.js" onchange="handleFileUpload(event)">
-            </label>
-          </div>
-          <div class="field-label">DIRECT EDIT</div>
-          <textarea id="codeArea" name="code" required>${escapeHTML(data.code)}</textarea>
-          <button type="submit" class="btn-save"><i class="ph ph-floppy-disk"></i> SAVE CHANGES</button>
-        </form>
-      </div>
-    </div>
+    <div class="center-card-wrap"><div class="quick-card"><div class="result-box" style="margin-top:0;margin-bottom:25px"><div style="font-size:11px;color:var(--vs-white);font-weight:bold;font-family:'Orbitron'">LOADSTRING COMMAND:</div><button type="button" class="copy-btn" onclick="copyText('loadstring-text-edit', this)"><i class="ph ph-copy"></i> COPY</button><div class="code-preview" id="loadstring-text-edit" style="color:#fff">${loadstringCommand}</div></div>
+    <form action="/edit/${id}" method="POST"><div style="background:rgba(255,255,255,.02);padding:15px;border-radius:8px;border:1px solid var(--vs-border);margin-bottom:20px"><label class="field-label"><i class="ph ph-upload-simple"></i> UPLOAD NEW FILE</label><label class="btn-upload" style="background:var(--vs-white);color:var(--vs-black);border:none"><i class="ph ph-folder-open"></i> SELECT FILE...<input type="file" accept=".lua,.txt,.luau,.js" onchange="handleFileUpload(event)"></label></div>
+    <div class="field-label">DIRECT EDIT</div><textarea id="codeArea" name="code" required>${escapeHTML(data.code)}</textarea><button type="submit" class="btn-save"><i class="ph ph-floppy-disk"></i> SAVE CHANGES</button></form></div></div>
   `, user));
 });
 
@@ -1001,15 +846,7 @@ app.get('/tos', (req, res) => {
   const user = getCookie(req, 'user_session');
   res.send(baseHTML(`
     <section class="hero"><div class="hero-badge"><i class="ph ph-gavel"></i> LEGAL</div><h1><span class="line2">TERMS OF SERVICE</span></h1></section>
-    <div class="center-card-wrap" style="max-width:800px;">
-      <div class="quick-card">
-        <div class="tos-list">
-          <div class="tos-item"><div class="tos-title"><span>01 //</span> Redistribution</div><div class="tos-desc">You are not permitted to redistribute scripts without permission.</div></div>
-          <div class="tos-item"><div class="tos-title"><span>02 //</span> Acceptable Use</div><div class="tos-desc">You must not use this service for malicious purposes.</div></div>
-          <div class="tos-item"><div class="tos-title"><span>03 //</span> Ownership</div><div class="tos-desc">All code snippets remain the sole property of their respective creators.</div></div>
-        </div>
-      </div>
-    </div>
+    <div class="center-card-wrap" style="max-width:800px"><div class="quick-card"><div class="tos-list"><div class="tos-item"><div class="tos-title"><span>01 //</span> Redistribution</div><div class="tos-desc">You are not permitted to redistribute scripts without permission.</div></div><div class="tos-item"><div class="tos-title"><span>02 //</span> Acceptable Use</div><div class="tos-desc">You must not use this service for malicious purposes.</div></div><div class="tos-item"><div class="tos-title"><span>03 //</span> Ownership</div><div class="tos-desc">All code snippets remain the sole property of their respective creators.</div></div></div></div></div>
   `, user));
 });
 
@@ -1055,4 +892,6 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`[VantaShield.com] Secure Server running on Port: ${PORT}`);
   console.log(`Master IP: ${MASTER_IP || '(chưa xác định - đợi request đầu tiên)'}`);
+  console.log(`Block All: ${BLOCK_ALL ? 'BẬT' : 'TẮT'}`);
+  console.log(`Bảo vệ: Chỉ IP Việt Nam, Rate Limit, WAF, User-Agent Filter, Helmet`);
 });
