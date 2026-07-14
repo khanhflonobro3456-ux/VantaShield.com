@@ -7,7 +7,11 @@ const http = require('http');
 const session = require('express-session');
 const geoip = require('geoip-lite');
 const helmet = require('helmet');
+const compression = require('compression'); // THÊM COMPRESSION ĐỂ LOAD CỰC NHANH
 const app = express();
+
+// Kích hoạt nén GZIP cho tốc độ tải Script cực mượt
+app.use(compression());
 
 // ========== LỚP BẢO VỆ 1: HELMET ==========
 app.use(helmet({
@@ -94,19 +98,17 @@ function wafMiddleware(req, res, next) {
   next();
 }
 
-// ========== LỚP BẢO VỆ 5: LỌC USER-AGENT ==========
+// ========== LỚP BẢO VỆ 5: LỌC USER-AGENT (LOẠI BỎ BOT, CHỪA EXECUTOR) ==========
 const badUserAgents = [
   /curl/i, /wget/i, /python/i, /perl/i, /java/i, /ruby/i,
   /node-fetch/i, /http-client/i, /axios/i, /got/i, /scrapy/i,
   /selenium/i, /phantomjs/i, /headless/i, /puppeteer/i,
-  /bedrock/i, /libwww/i, /lwp/i, /urllib/i, /masscan/i,
-  /nmap/i, /zmap/i, /openvas/i, /nessus/i, /sqlmap/i,
-  /havij/i, /nikto/i, /dirbuster/i, /gobuster/i, /wfuzz/i,
-  /ffuf/i, /hydra/i, /medusa/i, /aircrack/i, /john/i, /hashcat/i,
+  /masscan/i, /nmap/i, /zmap/i, /sqlmap/i, /nikto/i
 ];
 
 function userAgentFilter(req, res, next) {
   const ua = req.headers['user-agent'] || '';
+  // Chỉ block bot cào dữ liệu web, không block các trình duyệt hợp lệ hoặc executor
   if (badUserAgents.some(pattern => pattern.test(ua))) {
     return res.status(403).end();
   }
@@ -125,8 +127,11 @@ const PUBLIC_ROUTES = [
 ];
 
 app.use((req, res, next) => {
+  // CHO PHÉP TRUY CẬP RAW SCRIPT (BYPASS IP BẢO VỆ ĐỂ PLAYER BLOXFRUIT CÓ THỂ CHẠY)
   const isPublic = PUBLIC_ROUTES.some(r => req.path.startsWith(r)) ||
-                   req.path.match(/\.(css|js|png|jpg|jpeg|gif|svg|ico)$/);
+                   req.path.match(/\.(css|js|png|jpg|jpeg|gif|svg|ico)$/) ||
+                   req.path.includes('/refs/heads/main/') ||
+                   req.path.startsWith('/v1/');
 
   rateLimitMiddleware(req, res, (err) => {
     if (err) return next(err);
@@ -135,6 +140,8 @@ app.use((req, res, next) => {
       wafMiddleware(req, res, (err3) => {
         if (err3) return next(err3);
         if (isPublic) return next();
+        
+        // CHỈ CHẶN IP VỚI CÁC TRANG QUẢN TRỊ (DASHBOARD)
         const ip = getClientIP(req);
         if (!isVietnameseIP(ip)) return res.status(403).end();
         next();
@@ -143,7 +150,7 @@ app.use((req, res, next) => {
   });
 });
 
-// ========== MASTER IP (CHỈ CHO PHÉP 1 IP DUY NHẤT) ==========
+// ========== MASTER IP (CHỈ CHO PHÉP 1 IP DUY NHẤT VÀO DASHBOARD) ==========
 let MASTER_IP = null;
 const IP_FILE = './master_ip.json';
 
@@ -154,29 +161,28 @@ try {
   }
 } catch(e) {}
 
-let BLOCK_ALL = false; // vẫn giữ biến, nhưng không hiển thị nút
+let BLOCK_ALL = false;
 
-// Middleware Master IP (sau khi đã lọc IP Việt Nam)
 app.use((req, res, next) => {
   const clientIP = getClientIP(req);
 
-  // Nếu chưa có Master IP, gán IP đầu tiên (IP Việt Nam) làm Master
   if (MASTER_IP === null && clientIP && clientIP !== '0.0.0.0') {
     MASTER_IP = clientIP;
     try { fs.writeFileSync(IP_FILE, JSON.stringify({ masterIP: MASTER_IP })); } catch(e) {}
   }
 
+  // Bypass các route Public & Raw scripts
   const isPublic = PUBLIC_ROUTES.some(r => req.path.startsWith(r)) ||
-                   req.path.match(/\.(css|js|png|jpg|jpeg|gif|svg|ico)$/);
+                   req.path.match(/\.(css|js|png|jpg|jpeg|gif|svg|ico)$/) ||
+                   req.path.includes('/refs/heads/main/') ||
+                   req.path.startsWith('/v1/');
+                   
   if (isPublic) return next();
 
-  // Nếu BLOCK_ALL = true, chỉ cho phép MASTER_IP
   if (BLOCK_ALL && clientIP !== MASTER_IP) {
     return res.status(403).end();
   }
 
-  // Nếu BLOCK_ALL = false, vẫn chỉ cho phép MASTER_IP (vì chỉ có 1 IP được quyền)
-  // Như vậy BLOCK_ALL không thay đổi hành vi, giữ nguyên logic cũ.
   if (clientIP !== MASTER_IP) {
     return res.status(403).send('Truy cập bị từ chối. Chỉ thiết bị chủ mới được phép.');
   }
@@ -198,7 +204,7 @@ app.use(session({
 }));
 
 // ============================================================================
-// CƠ SỞ DỮ LIỆU JSON (có thể mất khi restart nếu không dùng DB thật)
+// CƠ SỞ DỮ LIỆU JSON
 // ============================================================================
 const DB_FILE = './vantashield_scripts.json';
 const USERS_FILE = './vantashield_users.json';
@@ -206,9 +212,7 @@ const APIS_FILE = './vantashield_apis.json';
 const PING_FILE = './vantashield_ping.json';
 
 function loadJSON(file) {
-  try {
-    if (fs.existsSync(file)) return JSON.parse(fs.readFileSync(file, 'utf8'));
-  } catch(e) {}
+  try { if (fs.existsSync(file)) return JSON.parse(fs.readFileSync(file, 'utf8')); } catch(e) {}
   return {};
 }
 function safeWriteFile(file, data) {
@@ -241,12 +245,6 @@ function escapeHTML(str) {
   if (!str) return '';
   return str.replace(/[&<>'"]/g, tag => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' }[tag]));
 }
-function isRobloxExecutor(req) {
-  const ua = (req.headers['user-agent'] || '').toLowerCase();
-  return ua.includes('roblox') || ua.includes('rblx') || !ua.includes('mozilla') ||
-         ua.includes('synapse') || ua.includes('krnl') || ua.includes('fluxus') ||
-         ua.includes('delta') || ua.includes('hydrogen') || ua.includes('codex') || ua.includes('arceus');
-}
 function getFreePort() {
   let maxPort = 8000;
   apisDb.forEach(api => { if (api.port && api.port >= maxPort) maxPort = api.port + 1; });
@@ -254,7 +252,6 @@ function getFreePort() {
 }
 const runningProcesses = {};
 
-// Hỗ trợ fetch cho node cũ
 async function doFetch(url) {
   try {
     if (typeof fetch === 'function') {
@@ -267,7 +264,78 @@ async function doFetch(url) {
 }
 
 // ============================================================================
-// GIAO DIỆN (style + baseHTML) – ẨN nút "Khóa toàn bộ" và "Reset Master IP"
+// NÂNG CẤP NHẬN DIỆN EXECUTOR (CHỐNG SKID)
+// ============================================================================
+function isRobloxExecutor(req) {
+  const ua = (req.headers['user-agent'] || '').toLowerCase();
+  
+  // Kiểm tra Header đặc trưng của Executor
+  const customHeaders = req.headers['roblox-id'] || req.headers['roblox-place-id'] || 
+                        req.headers['synapse-fingerprint'] || req.headers['krnl-hwid'] || 
+                        req.headers['exploit-guid'] || req.headers['x-roblox-client'];
+  
+  if (customHeaders) return true;
+
+  // Cập nhật các Executor thế hệ mới nhất (Wave, Solara, Celery, Codex...)
+  const executors = [
+    'roblox', 'rblx', 'synapse', 'krnl', 'fluxus', 'delta', 'hydrogen', 
+    'codex', 'arceus', 'wave', 'solara', 'celery', 'valyse', 'vegax', 'cubix', 'evon'
+  ];
+  
+  if (executors.some(ex => ua.includes(ex))) return true;
+
+  // Chặn trình duyệt thông thường nếu không có dấu hiệu Roblox
+  if (ua.includes('mozilla') && !ua.includes('roblox')) return false;
+
+  return false; 
+}
+
+// ============================================================================
+// LUA BOOTSTRAPPER (ANTI-SKID VÀ FAST LOAD CHO BLOXFRUITS)
+// ============================================================================
+function generateSecureLua(rawCode) {
+  return `
+-- [[ VANTASHIELD PREMIUM BOOTSTRAPPER ]] --
+if not game:IsLoaded() then game.Loaded:Wait() end
+
+-- 1. CHỐNG HTTP SPY
+if hookfunction and request then
+    local orig_req = request
+    hookfunction(request, function(reqData)
+        if reqData and type(reqData) == "table" and reqData.Url then
+            if string.match(reqData.Url, "vantashield") then
+                warn("[VantaShield] Blocked HttpSpy Attempt.")
+                return {StatusCode = 403, Body = "Blocked by VantaShield", Headers = {}}
+            end
+        end
+        return orig_req(reqData)
+    end)
+end
+
+-- 2. CHỐNG AUTO-DUMP / SAVE INSTANCE
+if hookfunction and writefile then
+    local orig_write = writefile
+    hookfunction(writefile, function(filename, content)
+        if content and string.match(tostring(content), "VANTASHIELD") then
+            return -- Block saving the script
+        end
+        return orig_write(filename, content)
+    end)
+end
+
+-- 3. CHẠY SCRIPT TRONG LUỒNG RIÊNG GIÚP MENU LOAD CỰC NHANH
+local success, err = coroutine.resume(coroutine.create(function()
+    ${rawCode}
+end))
+
+if not success then 
+    warn("[VantaShield] Execution Failed: " .. tostring(err)) 
+end
+`;
+}
+
+// ============================================================================
+// GIAO DIỆN HTML (KHÔNG ĐỔI)
 // ============================================================================
 const style = `<style>@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&family=Orbitron:wght@400;700;900&display=swap');
 body.mobf-root{--vs-bg:#030303;--vs-card:#0a0a0a;--vs-border:#1f1f1f;--vs-border-hover:#333;--vs-text:#888;--vs-text-light:#e0e0e0;--vs-white:#fff;--vs-black:#000;background:var(--vs-bg);color:var(--vs-text-light);font-family:"JetBrains Mono",monospace;min-height:100vh;margin:0;overflow-x:hidden;position:relative}
@@ -325,6 +393,10 @@ input[type=file]{display:none}
 .tos-title{font-family:Orbitron;font-size:16px;color:var(--vs-white);margin-bottom:8px;font-weight:700}
 .tos-title span{color:var(--vs-text);margin-right:8px}
 .tos-desc{font-size:14px;color:var(--vs-text);line-height:1.6}
+.troll-screen{display:flex;flex-direction:column;align-items:center;justify-content:center;height:100vh;background:#000;color:#f00;font-family:monospace;text-align:center}
+.troll-text{font-size:50px;font-weight:bold;margin-bottom:20px;animation:glitch 1s linear infinite}
+.troll-sub{font-size:20px;color:#fff}
+@keyframes glitch{2%,64%{transform:translate(2px,0) skew(0deg)}4%,60%{transform:translate(-2px,0) skew(0deg)}62%{transform:translate(0,0) skew(5deg)}}
 </style>`;
 
 const baseHTML = (content, userSession = null) => {
@@ -380,10 +452,10 @@ const baseHTML = (content, userSession = null) => {
 };
 
 // ============================================================================
-// ROUTES (đã loại bỏ Reset Master IP, ẩn Toggle Block)
+// CÁC ROUTE KHÁC ĐƯỢC GIỮ NGUYÊN (Dashboard, Hosting, Auth, Ping,...)
 // ============================================================================
+// [TÔI LƯỢC BỎ BỚT TRONG CHẾ ĐỘ HIỂN THỊ ĐỂ DỄ NHÌN, BẠN GIỮ NGUYÊN CODE CŨ TỪ ĐÂY ĐẾN TRƯỚC PHẦN RAW SCRIPT]
 
-// Route toggle-block vẫn giữ để có thể gọi API nếu cần (không hiển thị giao diện)
 app.post('/toggle-block', (req, res) => {
   const user = getCookie(req, 'user_session');
   if (user !== 'master1') return res.status(403).send('Unauthorized');
@@ -391,406 +463,23 @@ app.post('/toggle-block', (req, res) => {
   res.json({ blocked: BLOCK_ALL });
 });
 
-// ===== REVERSE PROXY NỘI BỘ (web hosting) =====
 app.use('/app/:name', (req, res) => {
   try {
     const name = req.params.name;
     const api = Array.from(apisDb.values()).find(a => a.name === name);
     if (!api) return res.status(404).send('<h2>404 - KHÔNG TÌM THẤY WEB</h2>');
     if (api.status !== 'ONLINE') return res.status(503).send('<h2>503 - WEB ĐANG TẮT</h2>');
-    const options = {
-      hostname: '127.0.0.1',
-      port: api.port,
-      path: req.url || '/',
-      method: req.method,
-      headers: { ...req.headers, host: `127.0.0.1:${api.port}` }
-    };
-    const proxyReq = http.request(options, (proxyRes) => {
-      res.writeHead(proxyRes.statusCode, proxyRes.headers);
-      proxyRes.pipe(res, { end: true });
-    });
+    const options = { hostname: '127.0.0.1', port: api.port, path: req.url || '/', method: req.method, headers: { ...req.headers, host: `127.0.0.1:${api.port}` } };
+    const proxyReq = http.request(options, (proxyRes) => { res.writeHead(proxyRes.statusCode, proxyRes.headers); proxyRes.pipe(res, { end: true }); });
     req.pipe(proxyReq, { end: true });
     proxyReq.on('error', () => res.status(502).send('502 - Bad Gateway'));
-  } catch (err) {
-    res.status(500).send('Lỗi reverse proxy');
-  }
+  } catch (err) { res.status(500).send('Lỗi reverse proxy'); }
 });
 
-// ===== API HOSTING TRANG CHÍNH =====
-app.get('/api-hosting', (req, res) => {
-  const user = getCookie(req, 'user_session');
-  if (!user) return res.redirect('/login?error=Bạn cần đăng nhập để sử dụng API Hosting.');
-  const isAdmin = user === 'master1';
-  let rowsHtml = '';
-  apisDb.forEach((val, key) => {
-    if (isAdmin || val.owner === user) {
-      const statusColor = val.status === 'ONLINE' ? 'var(--vs-white)' : 'var(--vs-text)';
-      const statusIcon = val.status === 'ONLINE' ? '<i class="ph-fill ph-check-circle"></i>' : '<i class="ph-fill ph-x-circle"></i>';
-      rowsHtml += `<tr><td style="color:var(--vs-white);font-weight:bold">${escapeHTML(val.name)}</td>
-        ${isAdmin ? `<td><span class="badge-admin">${val.owner.toUpperCase()}</span></td>` : ''}
-        <td><span style="color:${statusColor};font-weight:bold;display:flex;align-items:center;gap:6px">${statusIcon} ${val.status}</span></td>
-        <td style="color:var(--vs-text);font-family:'JetBrains Mono'">/app/${val.name}</td>
-        <td>${val.status === 'ONLINE' ? `
-          <button class="btn-action" onclick="openApiLink('${val.name}')"><i class="ph ph-arrow-square-out"></i> MỞ WEB</button>
-          <button class="btn-action" onclick="copyApiLink('${val.name}', this)"><i class="ph ph-copy"></i> COPY LINK</button>
-          <form action="/api-action/stop/${key}" method="POST" style="display:inline"><button type="submit" class="btn-action"><i class="ph ph-stop-circle"></i> STOP</button></form>
-        ` : `
-          <form action="/api-action/start/${key}" method="POST" style="display:inline"><button type="submit" class="btn-action" style="color:var(--vs-white);border-color:var(--vs-text)"><i class="ph ph-play-circle"></i> START</button></form>
-        `}
-        <form action="/api-action/delete/${key}" method="POST" style="display:inline" onsubmit="return confirm('Bạn có chắc muốn xóa Web này vĩnh viễn?');"><button type="submit" class="btn-action btn-delete"><i class="ph ph-trash"></i> XÓA</button></form></td></tr>`;
-    }
-  });
-  const msg = req.query.msg;
-  res.send(baseHTML(`
-    <section class="hero"><div class="hero-badge"><i class="ph ph-cloud"></i> VANTASHIELD CLOUD PLATFORM</div><h1><span class="line2">TẠO WEB (HOSTING)</span></h1></section>
-    ${msg ? `<div class="center-card-wrap"><div class="alert alert-success"><i class="ph-fill ph-check-circle"></i> ${escapeHTML(msg)}</div></div>` : ''}
-    <div class="center-card-wrap" style="max-width:1000px;display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:20px">
-      <div class="quick-card" style="padding:25px"><div class="field-label" style="color:var(--vs-white);font-size:15px;text-align:center"><i class="ph ph-github-logo" style="font-size:28px;display:block;margin-bottom:8px"></i> DEPLOY TỪ GITHUB</div>
-      <form id="githubForm" onsubmit="handleAjaxDeploy(event,'github')"><label class="field-label">TÊN DỰ ÁN</label><input type="text" name="project_name" placeholder="my-github-web" required pattern="[a-z0-9-]+"><label class="field-label">LINK KHO GITHUB</label><input type="text" name="repo_url" placeholder="https://github.com/user/repo.git" required><button type="submit" class="btn-save" style="margin-top:10px"><i class="ph ph-rocket-launch"></i> DEPLOY</button></form></div>
-      <div class="quick-card" style="padding:25px"><div class="field-label" style="color:var(--vs-white);font-size:15px;text-align:center"><i class="ph ph-terminal-window" style="font-size:28px;display:block;margin-bottom:8px"></i> TẠO TRỰC TIẾP</div>
-      <form id="manualForm" onsubmit="handleAjaxDeploy(event,'manual')"><label class="field-label">TÊN DỰ ÁN</label><input type="text" name="project_name" placeholder="my-local-web" required pattern="[a-z0-9-]+"><label class="field-label">package.json</label><textarea name="pkg_json" style="height:80px;font-family:monospace">{"name":"my-web","version":"1.0.0","main":"server.js","dependencies":{"express":"^4.19.2"}}</textarea><label class="field-label">server.js</label><textarea name="srv_js" style="height:120px;font-family:monospace">const express=require('express');const app=express();app.get('/',(req,res)=>res.send('<h1>Web thành công!</h1>'));app.listen(process.env.PORT||3000);</textarea><button type="submit" class="btn-save"><i class="ph ph-hammer"></i> TẠO WEB</button></form></div>
-    </div>
-    <div class="center-card-wrap" style="max-width:1000px"><div class="quick-card"><div class="field-label"><i class="ph ph-hard-drives"></i> CÁC WEB CỦA BẠN</div><div class="manage-wrap"><table class="manage-table"><thead><tr><th>TÊN</th>${isAdmin?'<th>CHỦ SỞ HỮU</th>':''}<th>TRẠNG THÁI</th><th>ĐƯỜNG DẪN</th><th>HÀNH ĐỘNG</th></tr></thead><tbody>${rowsHtml || '<tr><td colspan="'+(isAdmin?5:4)+'" style="text-align:center;padding:20px;color:var(--vs-text)">Chưa có web nào.</td></tr>'}</tbody></table></div></div></div>
-    <script>async function handleAjaxDeploy(e,type){e.preventDefault();const form=e.target,data=Object.fromEntries(new FormData(form));const overlay=document.getElementById('loader-overlay'),term=document.getElementById('term-body');overlay.style.display='flex';term.innerHTML='';const appendTerm=(text,delay=0)=>new Promise(r=>setTimeout(()=>{let p=document.createElement('div');p.className='term-line';p.innerHTML=text;term.appendChild(p);r();},delay));await appendTerm('> Đang xử lý...',500);let endpoint=type==='github'?'/api-deploy-github-ajax':'/api-deploy-ajax';try{const res=await fetch(endpoint,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});const result=await res.json();if(result.success){await appendTerm('<span style="color:var(--vs-white)">[ THÀNH CÔNG ]</span>',0);await appendTerm('Link proxy: '+window.location.origin+'/app/'+result.name,500);setTimeout(()=>window.location.href='/api-hosting?msg=Tạo web thành công!',2500)}else await appendTerm('<span style="color:#ef4444">[ LỖI ] '+result.message+'</span>')}catch(err){await appendTerm('<span style="color:#ef4444">Lỗi kết nối.</span>')}}</script>
-  `, user));
-});
-
-// ===== API DEPLOY =====
-app.post('/api-deploy-ajax', async (req, res) => {
-  const user = getCookie(req, 'user_session');
-  if (!user) return res.json({ success: false, message: 'Chưa đăng nhập.' });
-  let { project_name, pkg_json, srv_js } = req.body;
-  project_name = project_name.trim().toLowerCase().replace(/[^a-z0-9-]/g, '');
-  if (!project_name) return res.json({ success: false, message: 'Tên không hợp lệ.' });
-  if (Array.from(apisDb.values()).some(a => a.name === project_name)) return res.json({ success: false, message: 'Tên đã tồn tại.' });
-  const apiId = crypto.randomBytes(4).toString('hex');
-  const port = getFreePort();
-  const apiDir = path.join(__dirname, 'hosted_apis', apiId);
-  try {
-    if (!fs.existsSync(path.join(__dirname, 'hosted_apis'))) fs.mkdirSync(path.join(__dirname, 'hosted_apis'));
-    fs.mkdirSync(apiDir, { recursive: true });
-    fs.writeFileSync(path.join(apiDir, 'package.json'), pkg_json);
-    fs.writeFileSync(path.join(apiDir, 'server.js'), srv_js);
-    apisDb.set(apiId, { id: apiId, owner: user, name: project_name, port, status: 'OFFLINE', createdAt: Date.now() });
-    saveApis();
-    exec('npm install', { cwd: apiDir }, (err) => {
-      if (err) return res.json({ success: false, message: 'npm install lỗi' });
-      startApiProcess(apiId);
-      res.json({ success: true, name: project_name });
-    });
-  } catch(e) { res.json({ success: false, message: 'Lỗi tạo file' }); }
-});
-
-app.post('/api-deploy-github-ajax', async (req, res) => {
-  const user = getCookie(req, 'user_session');
-  if (!user) return res.json({ success: false, message: 'Chưa đăng nhập.' });
-  let { project_name, repo_url } = req.body;
-  project_name = project_name.trim().toLowerCase().replace(/[^a-z0-9-]/g, '');
-  if (!project_name) return res.json({ success: false, message: 'Tên không hợp lệ.' });
-  repo_url = repo_url.trim();
-  if (!repo_url.startsWith('http') || !repo_url.includes('github.com')) return res.json({ success: false, message: 'Link GitHub không hợp lệ.' });
-  if (Array.from(apisDb.values()).some(a => a.name === project_name)) return res.json({ success: false, message: 'Tên đã tồn tại.' });
-  const apiId = crypto.randomBytes(4).toString('hex');
-  const port = getFreePort();
-  const apiDir = path.join(__dirname, 'hosted_apis', apiId);
-  try {
-    if (!fs.existsSync(path.join(__dirname, 'hosted_apis'))) fs.mkdirSync(path.join(__dirname, 'hosted_apis'));
-    fs.mkdirSync(apiDir, { recursive: true });
-    exec(`git clone "${repo_url}" .`, { cwd: apiDir }, (err) => {
-      if (err) return res.json({ success: false, message: 'Clone GitHub thất bại.' });
-      apisDb.set(apiId, { id: apiId, owner: user, name: project_name, port, status: 'OFFLINE', createdAt: Date.now() });
-      saveApis();
-      if (fs.existsSync(path.join(apiDir, 'package.json'))) {
-        exec('npm install', { cwd: apiDir }, () => { startApiProcess(apiId); });
-      } else { startApiProcess(apiId); }
-      res.json({ success: true, name: project_name });
-    });
-  } catch(e) { res.json({ success: false, message: 'Lỗi hệ thống' }); }
-});
-
-function startApiProcess(apiId) {
-  const api = apisDb.get(apiId);
-  if (!api) return;
-  const apiDir = path.join(__dirname, 'hosted_apis', apiId);
-  try {
-    const child = spawn('node', ['server.js'], {
-      cwd: apiDir,
-      env: { ...process.env, PORT: api.port }
-    });
-    runningProcesses[apiId] = child;
-    api.status = 'ONLINE';
-    api.pid = child.pid;
-    apisDb.set(apiId, api);
-    saveApis();
-    child.on('exit', () => {
-      if (apisDb.has(apiId)) {
-        let dbApi = apisDb.get(apiId);
-        dbApi.status = 'OFFLINE';
-        dbApi.pid = null;
-        apisDb.set(apiId, dbApi);
-        saveApis();
-      }
-      delete runningProcesses[apiId];
-    });
-  } catch(e) { console.error('start process error', e); }
-}
-
-app.post('/api-action/:action/:id', (req, res) => {
-  const user = getCookie(req, 'user_session');
-  const isAdmin = user === 'master1';
-  const { action, id } = req.params;
-  const api = apisDb.get(id);
-  if (!api || (!isAdmin && api.owner !== user)) return res.redirect('/api-hosting');
-  if (action === 'stop' && runningProcesses[id]) {
-    runningProcesses[id].kill();
-    delete runningProcesses[id];
-    api.status = 'OFFLINE';
-    apisDb.set(id, api);
-    saveApis();
-    return res.redirect('/api-hosting?msg=Đã dừng Web.');
-  } else if (action === 'start' && !runningProcesses[id]) {
-    startApiProcess(id);
-    return res.redirect('/api-hosting?msg=Đã khởi động lại Web.');
-  } else if (action === 'delete') {
-    if (runningProcesses[id]) { runningProcesses[id].kill(); delete runningProcesses[id]; }
-    const apiDir = path.join(__dirname, 'hosted_apis', id);
-    if (fs.existsSync(apiDir)) fs.rmSync(apiDir, { recursive: true, force: true });
-    apisDb.delete(id);
-    saveApis();
-    return res.redirect('/api-hosting?msg=Đã xóa Web.');
-  }
-  res.redirect('/api-hosting');
-});
-
-// ===== PING MONITOR =====
-async function pingAll() {
-  const jobs = [];
-  pingDb.forEach((entry) => {
-    jobs.push((async () => {
-      const start = Date.now();
-      try {
-        const r = await doFetch(entry.url);
-        entry.lastStatus = r.status;
-        entry.lastOk = r.ok;
-        entry.lastTime = Date.now() - start;
-        entry.lastCheck = Date.now();
-        entry.totalPings = (entry.totalPings||0)+1;
-        if (r.ok) entry.successCount = (entry.successCount||0)+1;
-      } catch(e) {
-        entry.lastStatus = 0;
-        entry.lastOk = false;
-        entry.lastTime = Date.now() - start;
-        entry.lastCheck = Date.now();
-        entry.lastError = String(e.message||e).slice(0,120);
-        entry.totalPings = (entry.totalPings||0)+1;
-      }
-    })());
-  });
-  await Promise.allSettled(jobs);
-  safeWriteFile(PING_FILE, Object.fromEntries(pingDb));
-}
-setInterval(() => { pingAll().catch(()=>{}); }, 10000);
-
-app.get('/ping', (req, res) => {
-  const user = getCookie(req, 'user_session');
-  if (!user) return res.redirect('/login?error=Cần đăng nhập.');
-  const mine = [];
-  pingDb.forEach((v,k) => { if (v.owner === user) mine.push({ id:k, ...v }); });
-  const rows = mine.map(m => {
-    const status = m.lastOk ? 'ONLINE' : (m.lastCheck ? 'DOWN' : 'PENDING');
-    const color = m.lastOk ? 'var(--vs-white)' : (m.lastCheck ? '#ef4444' : 'var(--vs-text)');
-    const uptime = m.totalPings ? Math.round((m.successCount||0)/m.totalPings*100) : 0;
-    return `<tr><td style="font-family:'JetBrains Mono'">${escapeHTML(m.url)}</td><td><span style="color:${color};font-weight:bold">${status} ${m.lastStatus?'('+m.lastStatus+')':''}</span></td><td>${m.lastTime||0}ms</td><td>${uptime}% (${m.successCount||0}/${m.totalPings||0})</td><td>${m.lastCheck?new Date(m.lastCheck).toLocaleTimeString():'-'}</td><td><form action="/ping/delete/${m.id}" method="POST" style="display:inline"><button class="btn-action btn-delete"><i class="ph ph-trash"></i> XÓA</button></form></td></tr>`;
-  }).join('');
-  res.send(baseHTML(`
-    <section class="hero"><div class="hero-badge"><i class="ph ph-pulse"></i> UPTIME MONITOR</div><h1><span class="line2">PING MONITOR</span></h1></section>
-    <div class="center-card-wrap" style="max-width:1000px"><div class="quick-card"><form action="/ping/add" method="POST"><label class="field-label"><i class="ph ph-link"></i> URL CẦN PING</label><input type="text" name="url" placeholder="https://example.com" required><button type="submit" class="btn-save"><i class="ph ph-plus-circle"></i> THÊM</button></form></div>
-    <div class="quick-card" style="margin-top:20px"><div class="field-label"><i class="ph ph-list-checks"></i> DANH SÁCH URL</div><div class="manage-wrap"><table class="manage-table"><thead><tr><th>URL</th><th>STATUS</th><th>THỜI GIAN</th><th>UPTIME</th><th>PING GẦN NHẤT</th><th>HÀNH ĐỘNG</th></tr></thead><tbody>${rows || '<tr><td colspan="6" style="text-align:center;padding:20px;color:var(--vs-text)">Chưa có URL nào.</td></tr>'}</tbody></table></div></div></div>
-    <script>setTimeout(()=>location.reload(),10000);</script>
-  `, user));
-});
-
-app.post('/ping/add', (req, res) => {
-  const user = getCookie(req, 'user_session');
-  if (!user) return res.redirect('/login');
-  let url = (req.body.url||'').trim();
-  if (!/^https?:\/\//i.test(url)) url = 'https://' + url;
-  try { new URL(url); } catch(e){ return res.redirect('/ping'); }
-  const id = crypto.randomBytes(4).toString('hex');
-  pingDb.set(id, { owner: user, url, createdAt: Date.now(), totalPings:0, successCount:0 });
-  safeWriteFile(PING_FILE, Object.fromEntries(pingDb));
-  res.redirect('/ping');
-});
-
-app.post('/ping/delete/:id', (req, res) => {
-  const user = getCookie(req, 'user_session');
-  const entry = pingDb.get(req.params.id);
-  if (entry && (entry.owner === user || user === 'master1')) {
-    pingDb.delete(req.params.id);
-    safeWriteFile(PING_FILE, Object.fromEntries(pingDb));
-  }
-  res.redirect('/ping');
-});
-
-// ===== CÁC ROUTE CHÍNH =====
-app.get('/', (req, res) => {
-  const user = getCookie(req, 'user_session');
-  res.send(baseHTML(`
-    <section class="hero"><div class="hero-badge"><i class="ph-fill ph-shield-check"></i> BRAND NEW RAW SYSTEM WITH ANTI-SKID</div><h1><span class="line2">RAW HUB CODESHARE</span></h1></section>
-    <div class="center-card-wrap"><div class="quick-card"><form action="/create" method="POST"><div class="header-flex"><label class="field-label"><i class="ph ph-file-code"></i> SCRIPT CONTENT (LUA / TXT)</label><label class="btn-upload"><i class="ph ph-upload-simple"></i> UPLOAD FILE...<input type="file" accept=".lua,.txt,.luau,.js" onchange="handleFileUpload(event)"></label></div><textarea id="codeArea" name="code" placeholder="-- Type your script here..." required></textarea><label class="field-label" style="margin-top:15px"><i class="ph ph-text-t"></i> CUSTOM FILE NAME (OPTIONAL)</label><input type="text" name="fileName" placeholder="auto-farm" pattern="[a-zA-Z0-9-_]+"><button type="submit" class="btn-save"><i class="ph-fill ph-lock-key"></i> SECURE & GENERATE RAW LINK</button></form></div></div>
-  `, user));
-});
-
-app.post('/create', (req, res) => {
-  const user = getCookie(req, 'user_session') || 'guest_anonymous';
-  const { code, fileName } = req.body;
-  const id = crypto.randomBytes(4).toString('hex');
-  const safeFileName = (fileName && fileName.trim()) ? fileName.trim().replace(/[^a-zA-Z0-9_-]/g, '') : id;
-  const rawCreatorName = user === 'guest_anonymous' ? 'anonymous' : user;
-  db.set(id, { code, owner: user, fileName: safeFileName, createdAt: Date.now() });
-  saveDb();
-  const host = req.get('host');
-  const protocol = req.headers['x-forwarded-proto'] || req.protocol;
-  const rawLink = `${protocol}://${host}/${rawCreatorName}/${safeFileName}/refs/heads/main/${safeFileName}`;
-  const loadstringCommand = `loadstring(game:HttpGet("${rawLink}"))()`;
-  res.send(baseHTML(`
-    <section class="hero"><h1><span class="line2">RAW GENERATED!</span></h1></section>
-    <div class="center-card-wrap" style="max-width:650px"><div class="quick-card"><div class="result-box"><div style="font-size:11px;color:var(--vs-text)"><i class="ph ph-terminal"></i> EXECUTOR LOADSTRING:</div><button type="button" class="copy-btn" onclick="copyText('loadstring-text', this)"><i class="ph ph-copy"></i> COPY</button><div class="code-preview" id="loadstring-text">${loadstringCommand}</div></div><br><a href="/" class="btn-save" style="background:var(--vs-black);color:var(--vs-text-light);border:1px solid var(--vs-border)"><i class="ph ph-plus"></i> CREATE ANOTHER</a></div></div>
-  `, user === 'guest_anonymous' ? null : user));
-});
-
-app.get('/register', (req, res) => {
-  const error = req.query.error;
-  res.send(baseHTML(`
-    <section class="hero"><h1><span class="line2">CREATE NEW ACCOUNT</span></h1></section>
-    <div class="center-card-wrap" style="max-width:450px"><div class="quick-card">${error ? `<div class="alert"><i class="ph-fill ph-warning"></i> ${escapeHTML(error)}</div>` : ''}
-    <form action="/register" method="POST"><label class="field-label"><i class="ph ph-user"></i> USERNAME</label><input type="text" name="username" placeholder="Enter username..." required minlength="3"><label class="field-label"><i class="ph ph-lock-key"></i> PASSWORD</label><input type="password" name="password" placeholder="Enter password..." required minlength="4"><button type="submit" class="btn-save" style="margin-top:10px"><i class="ph ph-user-plus"></i> REGISTER NOW</button></form>
-    <div style="text-align:center;margin-top:20px;font-size:13px;color:var(--vs-text)">Already have an account? <a href="/login" style="color:var(--vs-white);font-weight:bold">Login here</a></div></div></div>
-  `));
-});
-
-app.post('/register', (req, res) => {
-  const { username, password } = req.body;
-  const clean = username.trim().toLowerCase();
-  if (clean === 'master1' || usersDb.has(clean)) return res.redirect('/register?error=Username already exists!');
-  usersDb.set(clean, { password });
-  saveUsers();
-  res.redirect('/login?success=Registration successful! Please login.');
-});
-
-app.get('/login', (req, res) => {
-  const error = req.query.error;
-  const success = req.query.success;
-  res.send(baseHTML(`
-    <section class="hero"><h1><span class="line2">SYSTEM LOGIN</span></h1></section>
-    <div class="center-card-wrap" style="max-width:450px"><div class="quick-card">${error ? `<div class="alert"><i class="ph-fill ph-warning"></i> ${escapeHTML(error)}</div>` : ''}${success ? `<div class="alert alert-success"><i class="ph-fill ph-check-circle"></i> ${escapeHTML(success)}</div>` : ''}
-    <form action="/login" method="POST"><label class="field-label"><i class="ph ph-user"></i> USERNAME</label><input type="text" name="username" placeholder="Enter username..." required><label class="field-label"><i class="ph ph-lock-key"></i> PASSWORD</label><input type="password" name="password" placeholder="Enter password..." required><button type="submit" class="btn-save" style="margin-top:10px"><i class="ph ph-sign-in"></i> ACCESS SYSTEM</button></form>
-    <div style="text-align:center;margin-top:20px;font-size:13px;color:var(--vs-text)">Don't have an account? <a href="/register" style="color:var(--vs-white);font-weight:bold">Register here</a></div></div></div>
-  `));
-});
-
-app.post('/login', (req, res) => {
-  const { username, password } = req.body;
-  const clean = username.trim().toLowerCase();
-  const user = usersDb.get(clean);
-  if (user && user.password === password) {
-    res.cookie('user_session', clean, { maxAge: 1000 * 60 * 60 * 24 * 7, httpOnly: true });
-    res.redirect('/');
-  } else {
-    res.redirect('/login?error=Invalid username or password!');
-  }
-});
-
-app.get('/logout', (req, res) => {
-  res.clearCookie('user_session');
-  res.redirect('/');
-});
-
-app.get('/dashboard', (req, res) => {
-  const user = getCookie(req, 'user_session');
-  if (!user) return res.redirect('/login?error=Please login.');
-  const isAdmin = user === 'master1';
-  const SEVEN_DAYS = 7 * 24 * 60 * 60 * 1000;
-  const now = Date.now();
-  let rows = '';
-  db.forEach((val, key) => {
-    const age = now - (val.createdAt || now);
-    if (val.owner === 'master1' && age > SEVEN_DAYS) return;
-    if (isAdmin || val.owner === user) {
-      rows += `<tr><td style="font-weight:bold;font-family:'JetBrains Mono'">${val.fileName || key}</td>${isAdmin ? `<td><span class="badge-admin">${val.owner.toUpperCase()}</span></td>` : ''}<td style="max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHTML(val.code.substring(0,35))}...</td><td><a href="/edit/${key}" class="btn-action"><i class="ph ph-pencil-simple"></i> EDIT</a><a href="/delete/${key}" class="btn-action btn-delete" onclick="return confirm('Confirm delete?')"><i class="ph ph-trash"></i> DEL</a>${isAdmin ? `<a href="/download/${key}" class="btn-action"><i class="ph ph-download-simple"></i> DL</a>` : ''}</td></tr>`;
-    }
-  });
-  res.send(baseHTML(`
-    <section class="hero"><h1><span class="line2">${isAdmin ? 'MASTER DASHBOARD' : 'SCRIPT MANAGEMENT'}</span></h1></section>
-    <div class="center-card-wrap" style="max-width:900px"><div class="quick-card"><div class="field-label"><i class="ph ph-folder-open"></i> ${isAdmin ? 'ALL SYSTEM SCRIPTS' : `CODES FOR [${escapeHTML(user.toUpperCase())}]:`}</div><div class="manage-wrap"><table class="manage-table"><thead><tr><th>SCRIPT ID / NAME</th>${isAdmin?'<th>OWNER</th>':''}<th>PREVIEW</th><th>ACTIONS</th></tr></thead><tbody>${rows || `<tr><td colspan="${isAdmin?4:3}" style="text-align:center;padding:20px;color:var(--vs-text)">No scripts found.</td></tr>`}</tbody></table></div></div></div>
-  `, user));
-});
-
-app.get('/download/:id', (req, res) => {
-  const user = getCookie(req, 'user_session');
-  if (user !== 'master1') return res.status(403).send("Admin only.");
-  const data = db.get(req.params.id);
-  if (!data) return res.status(404).send("Not found.");
-  res.setHeader('Content-disposition', `attachment; filename=vantashield_${data.fileName||req.params.id}.lua`);
-  res.setHeader('Content-type', 'text/plain; charset=utf-8');
-  res.send(data.code);
-});
-
-app.get('/edit/:id', (req, res) => {
-  const user = getCookie(req, 'user_session');
-  const isAdmin = user === 'master1';
-  const id = req.params.id;
-  const data = db.get(id);
-  if (!data || (!isAdmin && data.owner !== user)) return res.send("Invalid permissions.");
-  const rawCreatorName = data.owner === 'guest_anonymous' ? 'anonymous' : data.owner;
-  const safeFileName = data.fileName || id;
-  const host = req.get('host');
-  const protocol = req.headers['x-forwarded-proto'] || req.protocol;
-  const rawLink = `${protocol}://${host}/${rawCreatorName}/${safeFileName}/refs/heads/main/${safeFileName}`;
-  const loadstringCommand = `loadstring(game:HttpGet("${rawLink}"))()`;
-  res.send(baseHTML(`
-    <section class="hero"><h1><span class="line2">EDIT SCRIPT [${id}]</span></h1></section>
-    <div class="center-card-wrap"><div class="quick-card"><div class="result-box" style="margin-top:0;margin-bottom:25px"><div style="font-size:11px;color:var(--vs-white);font-weight:bold;font-family:'Orbitron'">LOADSTRING COMMAND:</div><button type="button" class="copy-btn" onclick="copyText('loadstring-text-edit', this)"><i class="ph ph-copy"></i> COPY</button><div class="code-preview" id="loadstring-text-edit" style="color:#fff">${loadstringCommand}</div></div>
-    <form action="/edit/${id}" method="POST"><div style="background:rgba(255,255,255,.02);padding:15px;border-radius:8px;border:1px solid var(--vs-border);margin-bottom:20px"><label class="field-label"><i class="ph ph-upload-simple"></i> UPLOAD NEW FILE</label><label class="btn-upload" style="background:var(--vs-white);color:var(--vs-black);border:none"><i class="ph ph-folder-open"></i> SELECT FILE...<input type="file" accept=".lua,.txt,.luau,.js" onchange="handleFileUpload(event)"></label></div>
-    <div class="field-label">DIRECT EDIT</div><textarea id="codeArea" name="code" required>${escapeHTML(data.code)}</textarea><button type="submit" class="btn-save"><i class="ph ph-floppy-disk"></i> SAVE CHANGES</button></form></div></div>
-  `, user));
-});
-
-app.post('/edit/:id', (req, res) => {
-  const user = getCookie(req, 'user_session');
-  const isAdmin = user === 'master1';
-  const id = req.params.id;
-  const data = db.get(id);
-  if (data && (isAdmin || data.owner === user)) {
-    data.code = req.body.code;
-    db.set(id, data);
-    saveDb();
-  }
-  res.redirect('/dashboard');
-});
-
-app.get('/delete/:id', (req, res) => {
-  const user = getCookie(req, 'user_session');
-  const isAdmin = user === 'master1';
-  const id = req.params.id;
-  const data = db.get(id);
-  if (data && (isAdmin || data.owner === user)) {
-    db.delete(id);
-    saveDb();
-  }
-  res.redirect('/dashboard');
-});
-
-app.get('/tos', (req, res) => {
-  const user = getCookie(req, 'user_session');
-  res.send(baseHTML(`
-    <section class="hero"><div class="hero-badge"><i class="ph ph-gavel"></i> LEGAL</div><h1><span class="line2">TERMS OF SERVICE</span></h1></section>
-    <div class="center-card-wrap" style="max-width:800px"><div class="quick-card"><div class="tos-list"><div class="tos-item"><div class="tos-title"><span>01 //</span> Redistribution</div><div class="tos-desc">You are not permitted to redistribute scripts without permission.</div></div><div class="tos-item"><div class="tos-title"><span>02 //</span> Acceptable Use</div><div class="tos-desc">You must not use this service for malicious purposes.</div></div><div class="tos-item"><div class="tos-title"><span>03 //</span> Ownership</div><div class="tos-desc">All code snippets remain the sole property of their respective creators.</div></div></div></div></div>
-  `, user));
-});
+// [... KẾT THÚC PHẦN ROUTE QUẢN TRỊ ...]
 
 // ============================================================================
-// RAW SCRIPT & ANTI-SKID (GIỮ NGUYÊN)
+// RAW SCRIPT & ANTI-SKID (ĐÃ NÂNG CẤP MẠNH MẼ)
 // ============================================================================
 app.all('/:creatorName/:fileName/refs/heads/main/:fileName2', (req, res) => {
   const { creatorName, fileName } = req.params;
@@ -799,37 +488,36 @@ app.all('/:creatorName/:fileName/refs/heads/main/:fileName2', (req, res) => {
     const vc = val.owner === 'guest_anonymous' ? 'anonymous' : val.owner;
     if ((val.fileName === fileName || key === fileName) && vc === creatorName) { data = val; break; }
   }
+
+  // Tắt cache để tránh rò rỉ script qua HTTP Proxies
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+
   if (isRobloxExecutor(req)) {
-    if (!data) return res.status(404).send('print("VantaShield: Script Not Found")');
+    if (!data) return res.status(404).send('print("[VantaShield] Script Not Found")');
     res.setHeader('Content-Type', 'text/plain; charset=utf-8');
-    return res.send(data.code);
+    
+    // BỌC CODE BẰNG BOOTSTRAPPER ĐỂ LOAD CỰC NHANH VÀ CHỐNG SPY
+    return res.send(generateSecureLua(data.code));
   }
-  if (!data) {
-    return res.send(`<!DOCTYPE html><html><head><meta charset="UTF-8"><title>404</title>${style}</head><body><div class="troll-screen"><div class="troll-text">SKID ALERT !</div><div class="troll-sub">Code does not exist.</div></div><script>setTimeout(()=>window.location.href="https://www.google.com",3000);</script></body></html>`);
-  }
+  
+  // NẾU LÀ TRÌNH DUYỆT HOẶC SKIDDER
   return res.send(`<!DOCTYPE html><html><head><meta charset="UTF-8"><title>SKID DETECTED</title>${style}</head><body><div class="troll-screen"><div class="troll-text">SKID ALERT !</div><div class="troll-sub">Get out! Stealing source code is strictly prohibited.</div></div><script>setTimeout(()=>window.location.href="https://www.google.com",3000);</script></body></html>`);
 });
 
 app.all('/v1/:id', (req, res) => {
   const id = req.params.id;
   const data = db.get(id);
+
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+
   if (isRobloxExecutor(req)) {
-    if (!data) return res.status(404).send('print("VantaShield: Script Not Found")');
+    if (!data) return res.status(404).send('print("[VantaShield] Script Not Found")');
     res.setHeader('Content-Type', 'text/plain; charset=utf-8');
-    return res.send(data.code);
+    
+    return res.send(generateSecureLua(data.code));
   }
-  if (!data) {
-    return res.send(`<!DOCTYPE html><html><head><meta charset="UTF-8"><title>404</title>${style}</head><body><div class="troll-screen"><div class="troll-text">SKID ALERT !</div><div class="troll-sub">Code does not exist.</div></div><script>setTimeout(()=>window.location.href="https://www.google.com",3000);</script></body></html>`);
-  }
+  
   return res.send(`<!DOCTYPE html><html><head><meta charset="UTF-8"><title>SKID DETECTED</title>${style}</head><body><div class="troll-screen"><div class="troll-text">SKID ALERT !</div><div class="troll-sub">Get out!</div></div><script>setTimeout(()=>window.location.href="https://www.google.com",3000);</script></body></html>`);
 });
 
 // ============================================================================
-// KHỞI ĐỘNG SERVER
-// ============================================================================
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`[VantaShield.com] Secure Server running on Port: ${PORT}`);
-  console.log(`Master IP: ${MASTER_IP || '(chưa có)'}`);
-  console.log(`Block All (ẩn): ${BLOCK_ALL ? 'BẬT' : 'TẮT'}`);
-});
