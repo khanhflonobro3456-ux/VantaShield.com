@@ -4,21 +4,11 @@ const fs = require('fs');
 const path = require('path');
 const { spawn, exec } = require('child_process');
 const http = require('http');
-require('dotenv').config(); // THÊM DOTENV ĐỂ ĐỌC FILE .env
 const app = express();
 
-// ===== THÊM: OAuth + Session + Giám sát Ping =====
-const session = require('express-session');
-const passport = require('passport');
-const GoogleStrategy = require('passport-google-oauth20').Strategy;
-const GitHubStrategy = require('passport-github2').Strategy;
-const DiscordStrategy = require('passport-discord').Strategy;
-
 const DISCORD_INVITE_URL = 'https://discord.gg/C72jAuytN';
-const DISCORD_INVITE_CODE = 'C72jAuytN';
-let REQUIRED_GUILD_ID = process.env.DISCORD_GUILD_ID || null;
 
-// Khởi tạo lưu trữ dữ liệu giám sát Ping
+// ===== KHỞI TẠO LƯU TRỮ DỮ LIỆU GIÁM SÁT PING =====
 const PING_FILE = './vantashield_ping.json';
 let pingDb = new Map();
 try { if (fs.existsSync(PING_FILE)) pingDb = new Map(Object.entries(JSON.parse(fs.readFileSync(PING_FILE,'utf8')))); } catch(e){}
@@ -57,18 +47,22 @@ async function pingAll(){
 }
 setInterval(() => { pingAll().catch(()=>{}); }, 10000);
 
+// Tiện ích phụ trợ Lấy Cookie (Di chuyển lên đây để dùng chung)
+function getCookie(req, name) {
+    const cookies = req.headers.cookie || '';
+    const match = cookies.match(new RegExp('(^| )' + name + '=([^;]+)'));
+    return match ? decodeURIComponent(match[2]) : null;
+}
+
 // Lấy thông tin user session thống nhất
 function getSessionUser(req){
-  const cookieUser = getCookie(req, 'user_session');
-  if (cookieUser) return cookieUser;
-  if (req.user && req.user.username) return req.user.username;
-  return null;
+  return getCookie(req, 'user_session');
 }
-// ===== KẾT THÚC KHỐI OAUTH & PING =====
 
 
 // ============================================================================
-// HỆ THỐNG REVERSE PROXY NỘI BỘ
+// HỆ THỐNG REVERSE PROXY NỘI BỘ (KHẮC PHỤC LỖI PORT TRÊN RENDER)
+// Phải đặt trước body-parser để không bị lỗi stream
 // ============================================================================
 let apisDb = new Map();
 
@@ -94,6 +88,7 @@ app.use('/app/:name', (req, res) => {
         `);
     }
 
+    // Proxy request tới port nội bộ
     const targetPath = req.url || '/';
     const options = {
         hostname: '127.0.0.1',
@@ -122,155 +117,6 @@ app.use('/app/:name', (req, res) => {
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 app.use(express.json({ limit: '50mb' }));
 app.use(express.static(__dirname));
-
-app.use(session({
-  secret: process.env.SESSION_SECRET || 'vantashield-secret-change-me',
-  resave: false,
-  saveUninitialized: false,
-  cookie: { maxAge: 1000 * 60 * 60 * 24 * 7 }
-}));
-app.use(passport.initialize());
-app.use(passport.session());
-passport.serializeUser((u, done) => done(null, u));
-passport.deserializeUser((u, done) => done(null, u));
-
-function registerOAuthUser(profile, provider){
-  const uname = (provider + '_' + (profile.username || profile.displayName || profile.id)).toLowerCase().replace(/[^a-z0-9_]/g,'').slice(0,32);
-  if (!usersDb.has(uname)) { usersDb.set(uname, { password: null, provider, providerId: profile.id, avatar: (profile.photos && profile.photos[0] && profile.photos[0].value) || null }); saveUsers(); }
-  return uname;
-}
-
-// SỬA LỖI 404 OAUTH: Tách điều kiện khỏi Route
-let googleEnabled = false;
-if (process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET) {
-  googleEnabled = true;
-  passport.use(new GoogleStrategy({
-    clientID: process.env.GOOGLE_CLIENT_ID,
-    clientSecret: process.env.GOOGLE_CLIENT_SECRET,
-    callbackURL: (process.env.PUBLIC_URL || 'http://localhost:3000') + '/auth/google/callback'
-  }, (at, rt, profile, done) => {
-    const username = registerOAuthUser(profile, 'google');
-    done(null, { username, provider: 'google', profile });
-  }));
-}
-
-app.get('/auth/google', (req, res, next) => {
-    if (!googleEnabled) return res.redirect('/login?error=Tính năng Google chưa được gắn API Key trên hệ thống!');
-    passport.authenticate('google', { scope: ['profile','email'] })(req, res, next);
-});
-app.get('/auth/google/callback', (req, res, next) => {
-    if (!googleEnabled) return res.redirect('/login');
-    passport.authenticate('google', { failureRedirect: '/login?error=Google login failed' })(req, res, next);
-}, (req,res) => {
-    res.cookie('user_session', req.user.username, { maxAge: 1000*60*60*24*7, httpOnly: true });
-    res.redirect('/discord-verify');
-});
-
-let githubEnabled = false;
-if (process.env.GITHUB_CLIENT_ID && process.env.GITHUB_CLIENT_SECRET) {
-  githubEnabled = true;
-  passport.use(new GitHubStrategy({
-    clientID: process.env.GITHUB_CLIENT_ID,
-    clientSecret: process.env.GITHUB_CLIENT_SECRET,
-    callbackURL: (process.env.PUBLIC_URL || 'http://localhost:3000') + '/auth/github/callback'
-  }, (at, rt, profile, done) => {
-    const username = registerOAuthUser(profile, 'github');
-    done(null, { username, provider: 'github', profile });
-  }));
-}
-
-app.get('/auth/github', (req, res, next) => {
-    if (!githubEnabled) return res.redirect('/login?error=Tính năng GitHub chưa được gắn API Key trên hệ thống!');
-    passport.authenticate('github', { scope: ['user:email'] })(req, res, next);
-});
-app.get('/auth/github/callback', (req, res, next) => {
-    if (!githubEnabled) return res.redirect('/login');
-    passport.authenticate('github', { failureRedirect: '/login?error=GitHub login failed' })(req, res, next);
-}, (req,res) => {
-    res.cookie('user_session', req.user.username, { maxAge: 1000*60*60*24*7, httpOnly: true });
-    res.redirect('/discord-verify');
-});
-
-let discordEnabled = false;
-if (process.env.DISCORD_CLIENT_ID && process.env.DISCORD_CLIENT_SECRET) {
-  discordEnabled = true;
-  passport.use(new DiscordStrategy({
-    clientID: process.env.DISCORD_CLIENT_ID,
-    clientSecret: process.env.DISCORD_CLIENT_SECRET,
-    callbackURL: (process.env.PUBLIC_URL || 'http://localhost:3000') + '/auth/discord/callback',
-    scope: ['identify','guilds']
-  }, (at, rt, profile, done) => {
-    const username = registerOAuthUser(profile, 'discord');
-    const guilds = profile.guilds || [];
-    done(null, { username, provider: 'discord', profile, guilds, accessToken: at });
-  }));
-}
-
-app.get('/auth/discord', (req, res, next) => {
-    if (!discordEnabled) return res.redirect('/login?error=Tính năng Discord chưa được gắn API Key trên hệ thống!');
-    passport.authenticate('discord')(req, res, next);
-});
-app.get('/auth/discord/callback', (req, res, next) => {
-    if (!discordEnabled) return res.redirect('/login');
-    passport.authenticate('discord', { failureRedirect: '/login?error=Discord login failed' })(req, res, next);
-}, async (req,res) => {
-    try {
-      if (!REQUIRED_GUILD_ID) {
-        const fetchFn = global.fetch || (await import('node-fetch')).default;
-        const inv = await fetchFn('https://discord.com/api/v10/invites/' + DISCORD_INVITE_CODE).then(r=>r.json()).catch(()=>null);
-        if (inv && inv.guild && inv.guild.id) REQUIRED_GUILD_ID = inv.guild.id;
-      }
-      const inGuild = REQUIRED_GUILD_ID ? (req.user.guilds||[]).some(g => g.id === REQUIRED_GUILD_ID) : true;
-      req.session.discordVerified = inGuild;
-      res.cookie('user_session', req.user.username, { maxAge: 1000*60*60*24*7, httpOnly: true });
-      if (inGuild) return res.redirect('/');
-      return res.redirect('/discord-gate');
-    } catch(e){
-      return res.redirect('/discord-gate');
-    }
-});
-
-// Cổng xác minh thành viên Discord Server trước khi dùng web
-app.get('/discord-gate', (req,res) => {
-  res.send(baseHTML(`
-    <section class="hero">
-      <div class="hero-badge"><i class="ph-fill ph-discord-logo"></i> DISCORD GATE</div>
-      <h1><span class="line2">JOIN DISCORD TO CONTINUE</span></h1>
-    </section>
-    <div class="center-card-wrap" style="max-width:520px;">
-      <div class="quick-card" style="text-align:center;">
-        <div style="font-size:80px; color:#5865F2; margin-bottom:10px;"><i class="ph-fill ph-discord-logo"></i></div>
-        <p style="color:var(--vs-text-light); margin-bottom:20px;">Bạn cần tham gia server Discord của chúng tôi trước khi sử dụng VantaShield.</p>
-        <a href="${DISCORD_INVITE_URL}" target="_blank" class="btn-save" style="background:#5865F2; color:#fff; margin-bottom:12px;"><i class="ph-fill ph-discord-logo"></i> JOIN DISCORD SERVER</a>
-        <a href="/auth/discord" class="btn-save" style="background:var(--vs-white); color:var(--vs-black);"><i class="ph ph-arrow-clockwise"></i> ĐÃ VÀO, KIỂM TRA LẠI</a>
-        <p style="color:var(--vs-text); font-size:12px; margin-top:15px;">Sau khi bạn Join Discord xong, bấm "Kiểm tra lại".</p>
-      </div>
-    </div>
-  `, getSessionUser(req)));
-});
-
-app.get('/discord-verify', (req,res)=>{
-  if (req.session && req.session.discordVerified) return res.redirect('/');
-  res.redirect('/auth/discord');
-});
-
-const OPEN_PATHS = ['/discord-gate','/discord-verify','/auth/','/logout','/favicon.ico'];
-app.use((req,res,next) => {
-  if (req.path.startsWith('/app/')) return next();
-  if (req.path.startsWith('/v1/')) return next();
-  if (req.path.match(/^\/[^/]+\/[^/]+\/refs\/heads\/main\//)) return next();
-  if (OPEN_PATHS.some(p => req.path.startsWith(p))) return next();
-  if (req.session && req.session.discordVerified) return next();
-  
-  const u = getSessionUser(req);
-  if (u && !(req.session && req.session.discordVerified)) {
-    if (req.path === '/discord-gate') return next();
-    const RESTRICTED = ['/dashboard','/api-hosting','/ping','/chat-vn','/chat-global','/edit','/delete','/download','/create'];
-    if (RESTRICTED.some(p => req.path.startsWith(p))) return res.redirect('/discord-gate');
-  }
-  next();
-});
-
 
 // ============================================================================
 // KHỞI TẠO CƠ SỞ DỮ LIỆU ĐỊA PHƯƠNG
@@ -306,22 +152,17 @@ apisDb.forEach((api, key) => {
 });
 saveApis();
 
-// SỬA LỖI ĐĂNG NHẬP ADMIN: Mật khẩu Duykhanh2014 viết hoa chữ D
+// Tài khoản Admin mặc định
 if (!usersDb.has('master1')) {
-    usersDb.set('master1', { password: 'Duykhanh2014' });
+    usersDb.set('master1', { password: 'duykhanh2014' });
     saveUsers();
 }
 
+// Các tác vụ ghi dữ liệu vào tệp tin
 function saveDb() { fs.writeFileSync(DB_FILE, JSON.stringify(Object.fromEntries(db))); }
 function saveUsers() { fs.writeFileSync(USERS_FILE, JSON.stringify(Object.fromEntries(usersDb))); }
 function saveApis() { fs.writeFileSync(APIS_FILE, JSON.stringify(Object.fromEntries(apisDb))); }
 function saveChat() { fs.writeFileSync(CHAT_FILE, JSON.stringify(chatDb)); }
-
-function getCookie(req, name) {
-    const cookies = req.headers.cookie || '';
-    const match = cookies.match(new RegExp('(^| )' + name + '=([^;]+)'));
-    return match ? decodeURIComponent(match[2]) : null;
-}
 
 function escapeHTML(str) {
     if (!str) return '';
@@ -330,6 +171,7 @@ function escapeHTML(str) {
     }[tag]));
 }
 
+// BẢO MẬT CAO NHẤT: KHÔNG CHO PHÉP BẤT KỲ ĐƯỜNG BYPASS NÀO BẰNG QUERY TRÊN TRÌNH DUYỆT
 function isRobloxExecutor(req) {
     const userAgent = (req.headers['user-agent'] || '').toLowerCase();
     return userAgent.includes('roblox') || 
@@ -355,7 +197,7 @@ function getFreePort() {
 const runningProcesses = {};
 
 // ============================================================================
-// GIAO DIỆN CHUNG & CLIENT-SIDE SCRIPTS
+// 1. GIAO DIỆN CHUNG & CLIENT-SIDE SCRIPTS
 // ============================================================================
 const style = `
 <style>
@@ -683,15 +525,15 @@ const baseHTML = (content, userSession = null) => {
 `};
 
 // ============================================================================
-// ROUTER CHÍNH
+// 2. TẠO WEB HOSTING PROXY
 // ============================================================================
-
-app.get('/api-hosting', (req, res) => { /* Code như cũ... */ 
+app.get('/api-hosting', (req, res) => {
     const user = getCookie(req, 'user_session');
     if (!user) return res.redirect('/login?error=Bạn cần đăng nhập để sử dụng API Hosting.');
 
     const isAdmin = user === 'master1';
     let rowsHtml = '';
+    
     apisDb.forEach((val, key) => {
         if (isAdmin || val.owner === user) {
             const statusColor = val.status === 'ONLINE' ? 'var(--vs-white)' : 'var(--vs-text)';
@@ -718,6 +560,7 @@ app.get('/api-hosting', (req, res) => { /* Code như cũ... */
     });
 
     const msg = req.query.msg;
+
     res.send(baseHTML(`
         <section class="hero">
             <div class="hero-badge"><i class="ph ph-cloud"></i> VANTASHIELD CLOUD PLATFORM</div>
@@ -728,7 +571,8 @@ app.get('/api-hosting', (req, res) => { /* Code như cũ... */
         ${msg ? `<div class="center-card-wrap"><div class="alert alert-success"><i class="ph-fill ph-check-circle" style="margin-right:8px;"></i> ${escapeHTML(msg)}</div></div>` : ''}
 
         <div class="center-card-wrap" style="max-width: 1000px; display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 20px;">
-            <!-- HTML của form Deploy Github & Manual -->
+            
+            <!-- OPTION 1: DEPLOY FROM GITHUB -->
             <div class="quick-card" style="padding: 25px;">
                 <div class="field-label" style="color: var(--vs-white); font-size: 15px; margin-bottom: 20px; text-align:center;">
                     <i class="ph ph-github-logo" style="font-size: 28px; margin-bottom: 8px; display: block;"></i> DEPLOY TỪ GITHUB
@@ -746,6 +590,7 @@ app.get('/api-hosting', (req, res) => { /* Code như cũ... */
                 </form>
             </div>
 
+            <!-- OPTION 2: CREATE DIRECTLY -->
             <div class="quick-card" style="padding: 25px;">
                 <div class="field-label" style="color: var(--vs-white); font-size: 15px; margin-bottom: 20px; text-align:center;">
                     <i class="ph ph-terminal-window" style="font-size: 28px; margin-bottom: 8px; display: block;"></i> TẠO TRỰC TIẾP TẠI WEB
@@ -797,7 +642,7 @@ app.listen(PORT, () => console.log('Running'));</textarea>
                 </div>
             </div>
         </div>
-        
+
         <script>
         async function handleAjaxDeploy(e, type) {
             e.preventDefault();
@@ -866,7 +711,8 @@ app.listen(PORT, () => console.log('Running'));</textarea>
     `, user));
 });
 
-app.post('/api-deploy-ajax', async (req, res) => { /* Code như cũ... */ 
+// AJAX Handler cho "TẠO BẰNG TAY"
+app.post('/api-deploy-ajax', async (req, res) => {
     const user = getCookie(req, 'user_session');
     if (!user) return res.json({ success: false, message: 'Bạn chưa đăng nhập.' });
 
@@ -901,7 +747,8 @@ app.post('/api-deploy-ajax', async (req, res) => { /* Code như cũ... */
     }
 });
 
-app.post('/api-deploy-github-ajax', async (req, res) => { /* Code như cũ... */
+// AJAX Handler cho "DEPLOY GITHUB"
+app.post('/api-deploy-github-ajax', async (req, res) => {
     const user = getCookie(req, 'user_session');
     if (!user) return res.json({ success: false, message: 'Bạn chưa đăng nhập.' });
 
@@ -946,6 +793,7 @@ app.post('/api-deploy-github-ajax', async (req, res) => { /* Code như cũ... */
     }
 });
 
+// Khởi chạy server con Node.js
 function startApiProcess(apiId) {
     const api = apisDb.get(apiId);
     if (!api) return;
@@ -1012,7 +860,9 @@ app.post('/api-action/:action/:id', (req, res) => {
     res.redirect('/api-hosting');
 });
 
-// Chat Global & VN (Giữ nguyên)
+// ============================================================================
+// 3. KHU VỰC TRÒ CHUYỆN TOÀN CẦU VÀ VIỆT NAM (PERSISTENT API)
+// ============================================================================
 app.get('/api/chat/:room', (req, res) => {
     const room = req.params.room;
     if (room !== 'vn' && room !== 'global') return res.status(400).json({ error: 'Invalid room' });
@@ -1126,6 +976,10 @@ app.get('/chat-global', (req, res) => {
     res.send(baseHTML(chatTemplate('Global Chat', 'badge-global', 'Welcome to the Global Hub Chat. All messages are securely persisted on the Server.', 'global', user), user));
 });
 
+
+// ============================================================================
+// 4. CÁC TUYẾN ĐƯỜNG ĐIỀU HƯỚNG CHÍNH (HOME, DASHBOARD, LOGIN, TOS, RAW)
+// ============================================================================
 app.get('/', (req, res) => {
     const user = getCookie(req, 'user_session');
     res.send(baseHTML(`
@@ -1211,24 +1065,16 @@ app.get('/register', (req, res) => {
     `));
 });
 
-// SỬA LỖI ĐĂNG KÝ: Tự động thêm ký tự nếu trùng lặp
 app.post('/register', (req, res) => {
     const { username, password } = req.body;
-    let cleanUsername = username.trim().toLowerCase();
+    const cleanUsername = username.trim().toLowerCase();
     
-    if (cleanUsername === 'master1') {
-        return res.redirect('/register?error=Không thể đăng ký với tên quản trị viên!');
+    if (cleanUsername === 'master1' || usersDb.has(cleanUsername)) {
+        return res.redirect('/register?error=Username already exists!');
     }
-
-    if (usersDb.has(cleanUsername)) {
-        // Tự động thêm chuỗi random vào nếu tên đã tồn tại (VD: nam -> nam_a1b2)
-        const randomStr = crypto.randomBytes(2).toString('hex');
-        cleanUsername = `${cleanUsername}_${randomStr}`;
-    }
-
     usersDb.set(cleanUsername, { password });
     saveUsers(); 
-    res.redirect(`/login?success=Tạo tài khoản thành công! Tên đăng nhập của bạn là: ${cleanUsername}`);
+    res.redirect('/login?success=Registration successful! Please login.');
 });
 
 app.get('/login', (req, res) => {
@@ -1238,7 +1084,7 @@ app.get('/login', (req, res) => {
         <section class="hero"><h1><span class="line2">SYSTEM LOGIN</span></h1></section>
         <div class="center-card-wrap" style="max-width: 450px;">
             <div class="quick-card">
-                ${error ? `<div class="alert" style="color:#ef4444; border-color:#ef4444;"><i class="ph-fill ph-warning"></i> ${escapeHTML(error)}</div>` : ''}
+                ${error ? `<div class="alert"><i class="ph-fill ph-warning"></i> ${escapeHTML(error)}</div>` : ''}
                 ${success ? `<div class="alert alert-success"><i class="ph-fill ph-check-circle"></i> ${escapeHTML(success)}</div>` : ''}
                 <form action="/login" method="POST">
                     <label class="field-label"><i class="ph ph-user"></i> USERNAME</label>
@@ -1247,11 +1093,6 @@ app.get('/login', (req, res) => {
                     <input type="password" name="password" placeholder="Enter password..." required>
                     <button type="submit" class="btn-save" style="margin-top:10px;"><i class="ph ph-sign-in"></i> ACCESS SYSTEM</button>
                 </form>
-                <div style="display:flex; align-items:center; gap:10px; margin:20px 0;"><div style="flex:1;height:1px;background:var(--vs-border);"></div><span style="color:var(--vs-text); font-size:11px;">OR SIGN IN WITH</span><div style="flex:1;height:1px;background:var(--vs-border);"></div></div>
-                <a href="/auth/google" class="btn-save" style="background:#fff; color:#000; margin-bottom:10px;"><i class="ph ph-google-logo"></i> GOOGLE</a>
-                <a href="/auth/github" class="btn-save" style="background:#24292e; color:#fff; margin-bottom:10px;"><i class="ph ph-github-logo"></i> GITHUB</a>
-                <a href="/auth/discord" class="btn-save" style="background:#5865F2; color:#fff;"><i class="ph-fill ph-discord-logo"></i> DISCORD</a>
-                <p style="color:var(--vs-text); font-size:11px; text-align:center; margin-top:15px;">Bạn phải vào <a href="${DISCORD_INVITE_URL}" target="_blank" style="color:#5865F2;">Discord Server</a> trước khi được truy cập.</p>
             </div>
         </div>
     `));
@@ -1264,9 +1105,10 @@ app.post('/login', (req, res) => {
 
     if (user && user.password === password) {
         res.cookie('user_session', cleanUsername, { maxAge: 1000 * 60 * 60 * 24 * 7, httpOnly: true });
-        res.redirect('/discord-verify');
+        // Đã xóa cơ chế chuyển hướng sang trang xác minh Discord
+        res.redirect('/'); 
     } else {
-        res.redirect('/login?error=Tài khoản hoặc mật khẩu không chính xác!');
+        res.redirect('/login?error=Invalid username or password!');
     }
 });
 
@@ -1432,6 +1274,7 @@ app.get('/delete/:id', (req, res) => {
     res.redirect('/dashboard');
 });
 
+// Điều khoản sử dụng dịch vụ
 app.get('/tos', (req, res) => {
     const user = getCookie(req, 'user_session');
     res.send(baseHTML(`
@@ -1461,6 +1304,11 @@ app.get('/tos', (req, res) => {
     `, user));
 });
 
+// ============================================================================
+// HỆ THỐNG TRUY XUẤT RAW SCRIPT & ANTI-SKID BẢO MẬT TUYỆT ĐỐI
+// ============================================================================
+
+// Định dạng tệp tin giả lập Github: /creatorName/fileName/refs/heads/main/fileName
 app.all('/:creatorName/:fileName/refs/heads/main/:fileName2', (req, res) => {
     const { creatorName, fileName } = req.params;
     
@@ -1473,12 +1321,14 @@ app.all('/:creatorName/:fileName/refs/heads/main/:fileName2', (req, res) => {
         }
     }
 
+    // CHỈ CÓ EXECUTOR GAME ĐƯỢC PHÉP ĐỌC SCRIPT GỐC
     if (isRobloxExecutor(req)) {
         if (!data) return res.status(404).send('print("VantaShield: Script Not Found")');
         res.setHeader('Content-Type', 'text/plain; charset=utf-8');
         return res.send(data.code);
     }
 
+    // ĐỐI VỚI TRÌNH DUYỆT THƯỜNG TRUY CẬP -> BẮT BUỘC RA MÀN HÌNH TROLL BÁO ĐỘNG (SKID ALERT)
     if (!data) {
         return res.send(`
             <!DOCTYPE html>
@@ -1510,6 +1360,7 @@ app.all('/:creatorName/:fileName/refs/heads/main/:fileName2', (req, res) => {
     `);
 });
 
+// Cơ chế tương thích API v1 cũ
 app.all('/v1/:id', (req, res) => {
     const id = req.params.id;
     const data = db.get(id);
@@ -1552,6 +1403,9 @@ app.all('/v1/:id', (req, res) => {
 });
 
 
+// ============================================================================
+// GIÁM SÁT PING (Ping Monitor)
+// ============================================================================
 app.get('/ping', (req,res) => {
   const user = getSessionUser(req);
   if (!user) return res.redirect('/login?error=Cần đăng nhập để dùng Ping Monitor.');
