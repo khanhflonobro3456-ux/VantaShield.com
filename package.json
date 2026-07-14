@@ -1,14 +1,11 @@
 {
-  "name": "dos-attack-node",
+  "name": "Vantablack",
   "version": "1.0.0",
-  "description": "Web panel for DoS attack using Node.js",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
   },
-  "dependencies": {},
-  "engines": {
-    "node": ">=14.0.0"
-  },
-  "license": "UNLICENSED"
+  "dependencies": {
+    "express": "^4.19.2"
+  }
 }
