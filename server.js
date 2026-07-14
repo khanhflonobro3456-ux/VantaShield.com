@@ -4,9 +4,42 @@ const fs = require('fs');
 const path = require('path');
 const { spawn, exec } = require('child_process');
 const http = require('http');
+const session = require('express-session');
+const nodemailer = require('nodemailer');
 const app = express();
 
-// ===== CHỈ CHO PHÉP IP ĐẦU TIÊN TRUY CẬP (CHỦ) =====
+// ===== CẤU HÌNH EMAIL =====
+const EMAIL_TO = 'khanhflonobro778899@gmail.com';
+// Tạo transporter (dùng Gmail hoặc dịch vụ khác)
+const transporter = nodemailer.createTransport({
+  service: 'gmail',
+  auth: {
+    user: process.env.EMAIL_USER, // email gửi đi
+    pass: process.env.EMAIL_PASS  // mật khẩu ứng dụng
+  }
+});
+
+// Lưu OTP tạm (dùng RAM, có thể dùng file nếu cần)
+let otpStore = {
+  code: null,
+  expires: null // timestamp
+};
+
+function generateOTP() {
+  return Math.floor(100000 + Math.random() * 900000).toString();
+}
+
+function sendOTPEmail(otp) {
+  const mailOptions = {
+    from: process.env.EMAIL_USER,
+    to: EMAIL_TO,
+    subject: 'Mã xác thực VantaShield',
+    html: `<p>Mã OTP của bạn là: <b>${otp}</b></p><p>Mã có hiệu lực trong 5 phút.</p>`
+  };
+  return transporter.sendMail(mailOptions);
+}
+
+// ===== CHỈ CHO PHÉP IP ĐẦU TIÊN (MASTER) =====
 let MASTER_IP = null;
 const IP_FILE = './master_ip.json';
 try {
@@ -24,40 +57,41 @@ function getClientIP(req) {
   return req.connection.remoteAddress || req.ip || '0.0.0.0';
 }
 
-// Middleware chặn mọi IP không phải master
+// ===== MIDDLEWARE: MASTER IP + EMAIL VERIFICATION =====
+// Các route được phép truy cập mà không cần email verified và không cần master IP
+const PUBLIC_ROUTES = ['/verify-email', '/send-otp', '/verify-otp', '/login', '/register', '/logout', '/favicon.ico', '/reset-master'];
+const STATIC_EXT = ['.css', '.js', '.png', '.jpg', '.jpeg', '.gif', '.svg', '.ico'];
+
 app.use((req, res, next) => {
   const clientIP = getClientIP(req);
   // Nếu chưa có master, gán IP hiện tại làm master
   if (MASTER_IP === null) {
     MASTER_IP = clientIP;
     fs.writeFileSync(IP_FILE, JSON.stringify({ masterIP: MASTER_IP }));
+  }
+
+  // Cho phép truy cập các route công khai (không cần master, không cần email)
+  const isPublic = PUBLIC_ROUTES.some(r => req.path.startsWith(r)) || STATIC_EXT.some(ext => req.path.endsWith(ext));
+  if (isPublic) {
     return next();
   }
-  // Nếu IP khác master -> từ chối ngay
+
+  // Kiểm tra master IP
   if (clientIP !== MASTER_IP) {
-    res.status(403).send('Truy cập bị từ chối. Chỉ thiết bị chủ mới được phép.');
-    return;
+    return res.status(403).send('Truy cập bị từ chối. Chỉ thiết bị chủ mới được phép.');
   }
+
+  // Kiểm tra email verified (lưu trong session)
+  if (!req.session || !req.session.emailVerified) {
+    return res.redirect('/verify-email');
+  }
+
   next();
 });
 
-// Reset master IP (chỉ master1)
-app.get('/reset-master', (req, res) => {
-  const user = getCookie(req, 'user_session');
-  if (user !== 'master1') return res.status(403).send('Only master1 can reset.');
-  if (fs.existsSync(IP_FILE)) {
-    fs.unlinkSync(IP_FILE);
-    MASTER_IP = null;
-    res.send('Master IP đã được reset. Thiết bị tiếp theo sẽ trở thành chủ.');
-  } else {
-    res.send('Không có master IP để reset.');
-  }
-});
-
 // ============================================================================
-// CẤU HÌNH EXPRESS + SESSION
+// CẤU HÌNH EXPRESS
 // ============================================================================
-const session = require('express-session');
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 app.use(express.json({ limit: '50mb' }));
 app.use(express.static(__dirname));
@@ -133,6 +167,132 @@ function getFreePort() {
 }
 
 const runningProcesses = {};
+
+// ============================================================================
+// ROUTES XÁC THỰC EMAIL (công khai)
+// ============================================================================
+app.get('/verify-email', (req, res) => {
+  // Nếu đã verified thì chuyển về home
+  if (req.session && req.session.emailVerified) {
+    return res.redirect('/');
+  }
+  res.send(`
+    <!DOCTYPE html>
+    <html>
+    <head><meta charset="UTF-8"><title>Xác thực email</title>
+    <style>
+      body { background: #000; color: #fff; font-family: monospace; display: flex; justify-content: center; align-items: center; height: 100vh; margin:0; }
+      .card { background: #0a0a0a; border: 1px solid #333; padding: 30px; border-radius: 12px; max-width: 400px; width: 100%; text-align: center; }
+      input { width: 100%; padding: 12px; background: #000; border: 1px solid #333; color: #fff; border-radius: 8px; margin: 10px 0; font-size: 16px; }
+      button { background: #fff; color: #000; border: none; padding: 12px 20px; border-radius: 8px; font-weight: bold; cursor: pointer; width: 100%; font-size: 16px; }
+      button:hover { opacity: 0.8; }
+      .error { color: #ff4444; font-size: 14px; margin-top: 10px; }
+      .success { color: #44ff44; }
+      .resend { background: transparent; border: 1px solid #555; color: #aaa; margin-top: 10px; font-size: 14px; }
+    </style>
+    </head>
+    <body>
+      <div class="card">
+        <h2>🔐 Xác thực email</h2>
+        <p style="color:#888;">Mã OTP sẽ được gửi đến <b>${EMAIL_TO}</b></p>
+        <form id="otpForm">
+          <input type="text" id="otpInput" placeholder="Nhập mã 6 chữ số" maxlength="6" required>
+          <button type="submit" id="verifyBtn">Xác thực</button>
+          <button type="button" id="resendBtn" class="resend">Gửi lại mã</button>
+          <div id="message"></div>
+        </form>
+      </div>
+      <script>
+        async function sendOTP() {
+          const res = await fetch('/send-otp', { method: 'POST' });
+          const data = await res.json();
+          const msg = document.getElementById('message');
+          if (data.success) {
+            msg.innerHTML = '<span class="success">✅ Mã OTP đã được gửi!</span>';
+          } else {
+            msg.innerHTML = '<span class="error">❌ Lỗi gửi mã: ' + data.message + '</span>';
+          }
+        }
+        document.getElementById('resendBtn').addEventListener('click', sendOTP);
+        document.getElementById('otpForm').addEventListener('submit', async (e) => {
+          e.preventDefault();
+          const otp = document.getElementById('otpInput').value.trim();
+          if (!otp || otp.length !== 6) {
+            document.getElementById('message').innerHTML = '<span class="error">⚠️ Vui lòng nhập đủ 6 chữ số.</span>';
+            return;
+          }
+          const res = await fetch('/verify-otp', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ otp })
+          });
+          const data = await res.json();
+          const msg = document.getElementById('message');
+          if (data.success) {
+            msg.innerHTML = '<span class="success">✅ Xác thực thành công! Đang chuyển hướng...</span>';
+            setTimeout(() => window.location.href = '/', 1000);
+          } else {
+            msg.innerHTML = '<span class="error">❌ ' + data.message + '</span>';
+          }
+        });
+        // Tự động gửi OTP khi load trang
+        window.onload = sendOTP;
+      </script>
+    </body>
+    </html>
+  `);
+});
+
+app.post('/send-otp', (req, res) => {
+  const otp = generateOTP();
+  otpStore.code = otp;
+  otpStore.expires = Date.now() + 5 * 60 * 1000; // 5 phút
+
+  sendOTPEmail(otp)
+    .then(info => {
+      res.json({ success: true });
+    })
+    .catch(err => {
+      console.error('Lỗi gửi email:', err);
+      res.status(500).json({ success: false, message: 'Không thể gửi email. Kiểm tra cấu hình.' });
+    });
+});
+
+app.post('/verify-otp', (req, res) => {
+  const { otp } = req.body;
+  if (!otp) {
+    return res.json({ success: false, message: 'Thiếu mã OTP.' });
+  }
+  if (!otpStore.code || !otpStore.expires) {
+    return res.json({ success: false, message: 'Chưa có mã OTP hoặc mã đã hết hạn. Vui lòng gửi lại.' });
+  }
+  if (Date.now() > otpStore.expires) {
+    otpStore.code = null;
+    otpStore.expires = null;
+    return res.json({ success: false, message: 'Mã OTP đã hết hạn. Vui lòng gửi lại.' });
+  }
+  if (otp !== otpStore.code) {
+    return res.json({ success: false, message: 'Mã OTP không đúng.' });
+  }
+  // Xác thực thành công
+  req.session.emailVerified = true;
+  otpStore.code = null;
+  otpStore.expires = null;
+  res.json({ success: true });
+});
+
+// Reset master IP (chỉ master1)
+app.get('/reset-master', (req, res) => {
+  const user = getCookie(req, 'user_session');
+  if (user !== 'master1') return res.status(403).send('Only master1 can reset.');
+  if (fs.existsSync(IP_FILE)) {
+    fs.unlinkSync(IP_FILE);
+    MASTER_IP = null;
+    res.send('Master IP đã được reset. Thiết bị tiếp theo sẽ trở thành chủ.');
+  } else {
+    res.send('Không có master IP để reset.');
+  }
+});
 
 // ============================================================================
 // REVERSE PROXY NỘI BỘ
