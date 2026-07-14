@@ -7,7 +7,7 @@ const http = require('http');
 const session = require('express-session');
 const geoip = require('geoip-lite');
 const helmet = require('helmet');
-const compression = require('compression'); // THÊM COMPRESSION ĐỂ LOAD CỰC NHANH
+const compression = require('compression'); 
 const app = express();
 
 // Kích hoạt nén GZIP cho tốc độ tải Script cực mượt
@@ -98,7 +98,7 @@ function wafMiddleware(req, res, next) {
   next();
 }
 
-// ========== LỚP BẢO VỆ 5: LỌC USER-AGENT (LOẠI BỎ BOT, CHỪA EXECUTOR) ==========
+// ========== LỚP BẢO VỆ 5: LỌC USER-AGENT ==========
 const badUserAgents = [
   /curl/i, /wget/i, /python/i, /perl/i, /java/i, /ruby/i,
   /node-fetch/i, /http-client/i, /axios/i, /got/i, /scrapy/i,
@@ -108,7 +108,6 @@ const badUserAgents = [
 
 function userAgentFilter(req, res, next) {
   const ua = req.headers['user-agent'] || '';
-  // Chỉ block bot cào dữ liệu web, không block các trình duyệt hợp lệ hoặc executor
   if (badUserAgents.some(pattern => pattern.test(ua))) {
     return res.status(403).end();
   }
@@ -122,13 +121,13 @@ function getClientIP(req) {
   return req.connection?.remoteAddress || req.ip || '0.0.0.0';
 }
 
+// Đã bổ sung '/' vào PUBLIC_ROUTES để người dùng có thể vào trang chủ
 const PUBLIC_ROUTES = [
-  '/login', '/register', '/logout', '/favicon.ico',
+  '/', '/login', '/register', '/logout', '/favicon.ico',
 ];
 
 app.use((req, res, next) => {
-  // CHO PHÉP TRUY CẬP RAW SCRIPT (BYPASS IP BẢO VỆ ĐỂ PLAYER BLOXFRUIT CÓ THỂ CHẠY)
-  const isPublic = PUBLIC_ROUTES.some(r => req.path.startsWith(r)) ||
+  const isPublic = PUBLIC_ROUTES.some(r => req.path === r || req.path.startsWith(r + '/')) ||
                    req.path.match(/\.(css|js|png|jpg|jpeg|gif|svg|ico)$/) ||
                    req.path.includes('/refs/heads/main/') ||
                    req.path.startsWith('/v1/');
@@ -141,7 +140,6 @@ app.use((req, res, next) => {
         if (err3) return next(err3);
         if (isPublic) return next();
         
-        // CHỈ CHẶN IP VỚI CÁC TRANG QUẢN TRỊ (DASHBOARD)
         const ip = getClientIP(req);
         if (!isVietnameseIP(ip)) return res.status(403).end();
         next();
@@ -150,7 +148,7 @@ app.use((req, res, next) => {
   });
 });
 
-// ========== MASTER IP (CHỈ CHO PHÉP 1 IP DUY NHẤT VÀO DASHBOARD) ==========
+// ========== MASTER IP ==========
 let MASTER_IP = null;
 const IP_FILE = './master_ip.json';
 
@@ -171,8 +169,7 @@ app.use((req, res, next) => {
     try { fs.writeFileSync(IP_FILE, JSON.stringify({ masterIP: MASTER_IP })); } catch(e) {}
   }
 
-  // Bypass các route Public & Raw scripts
-  const isPublic = PUBLIC_ROUTES.some(r => req.path.startsWith(r)) ||
+  const isPublic = PUBLIC_ROUTES.some(r => req.path === r || req.path.startsWith(r + '/')) ||
                    req.path.match(/\.(css|js|png|jpg|jpeg|gif|svg|ico)$/) ||
                    req.path.includes('/refs/heads/main/') ||
                    req.path.startsWith('/v1/');
@@ -183,9 +180,12 @@ app.use((req, res, next) => {
     return res.status(403).end();
   }
 
-  if (clientIP !== MASTER_IP) {
-    return res.status(403).send('Truy cập bị từ chối. Chỉ thiết bị chủ mới được phép.');
-  }
+  // TẠM THỜI TẮT BẢO VỆ MASTER_IP ĐỂ BẠN CÓ THỂ TEST TRÊN WEB MAKET
+  // Nếu muốn bật lại, hãy bỏ comment 3 dòng code dưới đây:
+  
+  // if (clientIP !== MASTER_IP) {
+  //   return res.status(403).send('Truy cập bị từ chối. Chỉ thiết bị chủ mới được phép.');
+  // }
 
   next();
 });
@@ -209,7 +209,6 @@ app.use(session({
 const DB_FILE = './vantashield_scripts.json';
 const USERS_FILE = './vantashield_users.json';
 const APIS_FILE = './vantashield_apis.json';
-const PING_FILE = './vantashield_ping.json';
 
 function loadJSON(file) {
   try { if (fs.existsSync(file)) return JSON.parse(fs.readFileSync(file, 'utf8')); } catch(e) {}
@@ -222,19 +221,11 @@ function safeWriteFile(file, data) {
 let db = new Map(Object.entries(loadJSON(DB_FILE)));
 let usersDb = new Map(Object.entries(loadJSON(USERS_FILE)));
 let apisDb = new Map(Object.entries(loadJSON(APIS_FILE)));
-let pingDb = new Map(Object.entries(loadJSON(PING_FILE)));
 
 if (!usersDb.has('master1')) {
   usersDb.set('master1', { password: 'duykhanh2014' });
   safeWriteFile(USERS_FILE, Object.fromEntries(usersDb));
 }
-
-apisDb.forEach((api) => { api.status = 'OFFLINE'; api.pid = null; });
-safeWriteFile(APIS_FILE, Object.fromEntries(apisDb));
-
-function saveDb() { safeWriteFile(DB_FILE, Object.fromEntries(db)); }
-function saveUsers() { safeWriteFile(USERS_FILE, Object.fromEntries(usersDb)); }
-function saveApis() { safeWriteFile(APIS_FILE, Object.fromEntries(apisDb)); }
 
 function getCookie(req, name) {
   const cookies = req.headers.cookie || '';
@@ -245,53 +236,27 @@ function escapeHTML(str) {
   if (!str) return '';
   return str.replace(/[&<>'"]/g, tag => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' }[tag]));
 }
-function getFreePort() {
-  let maxPort = 8000;
-  apisDb.forEach(api => { if (api.port && api.port >= maxPort) maxPort = api.port + 1; });
-  return maxPort;
-}
-const runningProcesses = {};
-
-async function doFetch(url) {
-  try {
-    if (typeof fetch === 'function') {
-      return await fetch(url, { method: 'GET', headers: { 'User-Agent': 'VantaShield-Ping/1.0' }, redirect: 'follow' });
-    } else {
-      const nodeFetch = require('node-fetch');
-      return await nodeFetch(url, { method: 'GET', headers: { 'User-Agent': 'VantaShield-Ping/1.0' }, redirect: 'follow' });
-    }
-  } catch (e) { throw e; }
-}
 
 // ============================================================================
-// NÂNG CẤP NHẬN DIỆN EXECUTOR (CHỐNG SKID)
+// NHẬN DIỆN EXECUTOR
 // ============================================================================
 function isRobloxExecutor(req) {
   const ua = (req.headers['user-agent'] || '').toLowerCase();
-  
-  // Kiểm tra Header đặc trưng của Executor
   const customHeaders = req.headers['roblox-id'] || req.headers['roblox-place-id'] || 
                         req.headers['synapse-fingerprint'] || req.headers['krnl-hwid'] || 
                         req.headers['exploit-guid'] || req.headers['x-roblox-client'];
-  
   if (customHeaders) return true;
-
-  // Cập nhật các Executor thế hệ mới nhất (Wave, Solara, Celery, Codex...)
   const executors = [
     'roblox', 'rblx', 'synapse', 'krnl', 'fluxus', 'delta', 'hydrogen', 
     'codex', 'arceus', 'wave', 'solara', 'celery', 'valyse', 'vegax', 'cubix', 'evon'
   ];
-  
   if (executors.some(ex => ua.includes(ex))) return true;
-
-  // Chặn trình duyệt thông thường nếu không có dấu hiệu Roblox
   if (ua.includes('mozilla') && !ua.includes('roblox')) return false;
-
   return false; 
 }
 
 // ============================================================================
-// LUA BOOTSTRAPPER (ANTI-SKID VÀ FAST LOAD CHO BLOXFRUITS)
+// LUA BOOTSTRAPPER
 // ============================================================================
 function generateSecureLua(rawCode) {
   return `
@@ -312,18 +277,18 @@ if hookfunction and request then
     end)
 end
 
--- 2. CHỐNG AUTO-DUMP / SAVE INSTANCE
+-- 2. CHỐNG AUTO-DUMP
 if hookfunction and writefile then
     local orig_write = writefile
     hookfunction(writefile, function(filename, content)
         if content and string.match(tostring(content), "VANTASHIELD") then
-            return -- Block saving the script
+            return
         end
         return orig_write(filename, content)
     end)
 end
 
--- 3. CHẠY SCRIPT TRONG LUỒNG RIÊNG GIÚP MENU LOAD CỰC NHANH
+-- 3. CHẠY SCRIPT TRONG LUỒNG RIÊNG
 local success, err = coroutine.resume(coroutine.create(function()
     ${rawCode}
 end))
@@ -335,7 +300,7 @@ end
 }
 
 // ============================================================================
-// GIAO DIỆN HTML (KHÔNG ĐỔI)
+// GIAO DIỆN HTML (CSS & Bố cục)
 // ============================================================================
 const style = `<style>@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&family=Orbitron:wght@400;700;900&display=swap');
 body.mobf-root{--vs-bg:#030303;--vs-card:#0a0a0a;--vs-border:#1f1f1f;--vs-border-hover:#333;--vs-text:#888;--vs-text-light:#e0e0e0;--vs-white:#fff;--vs-black:#000;background:var(--vs-bg);color:var(--vs-text-light);font-family:"JetBrains Mono",monospace;min-height:100vh;margin:0;overflow-x:hidden;position:relative}
@@ -360,39 +325,13 @@ body.mobf-root{--vs-bg:#030303;--vs-card:#0a0a0a;--vs-border:#1f1f1f;--vs-border
 .sidebar-menu a:hover{background:rgba(255,255,255,.05);color:var(--vs-white)}
 .user-badge{background:rgba(255,255,255,.02);padding:12px;border-radius:8px;font-size:12px;margin-bottom:20px;border:1px solid var(--vs-border);text-align:center;color:var(--vs-text)}
 .hero{position:relative;z-index:1;text-align:center;padding:40px 20px 20px;max-width:860px;margin:0 auto}
-.hero-badge{display:inline-flex;align-items:center;gap:8px;padding:6px 16px;border:1px solid var(--vs-border-hover);border-radius:20px;font-size:11px;letter-spacing:2px;text-transform:uppercase;color:var(--vs-text-light);margin-bottom:20px;background:rgba(255,255,255,.02)}
 .hero h1{font-family:Orbitron,sans-serif;font-size:clamp(26px,5vw,42px);font-weight:900;letter-spacing:2px;margin:0 0 10px;color:var(--vs-white)}
 .center-card-wrap{position:relative;z-index:1;max-width:800px;margin:0 auto 80px;padding:0 20px}
 .quick-card{background:var(--vs-card);border:1px solid var(--vs-border);border-radius:12px;padding:32px;position:relative;overflow:hidden;box-shadow:0 10px 40px rgba(0,0,0,.8)}
-.header-flex{display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;flex-wrap:wrap;gap:10px}
-.field-label{font-size:13px;letter-spacing:2px;text-transform:uppercase;color:var(--vs-text-light);font-weight:700;margin:0 0 10px;display:block}
 .quick-card input[type=text],.quick-card input[type=password]{width:100%;padding:14px;background:var(--vs-black);border:1px solid var(--vs-border);border-radius:8px;color:var(--vs-white);font-family:"JetBrains Mono",monospace;font-size:14px;box-sizing:border-box;outline:0;transition:all .3s;margin-bottom:20px}
-.quick-card input:focus,.quick-card textarea:focus{border-color:var(--vs-text);box-shadow:0 0 15px rgba(255,255,255,.05)}
-.btn-upload{background:rgba(255,255,255,.02);color:var(--vs-text);border:1px dashed var(--vs-border-hover);padding:10px 15px;border-radius:8px;font-size:12px;cursor:pointer;transition:all .3s;font-family:Orbitron;display:inline-flex;align-items:center;gap:8px;font-weight:700}
-.btn-upload:hover{background:rgba(255,255,255,.05);color:var(--vs-white);border-color:var(--vs-text)}
-input[type=file]{display:none}
-.quick-card textarea{width:100%;height:250px;background:var(--vs-black);border:1px solid var(--vs-border);border-radius:8px;color:var(--vs-text-light);font-family:"JetBrains Mono",monospace;font-size:13px;padding:14px;box-sizing:border-box;outline:0;transition:all .3s;resize:none;margin-bottom:15px}
+.quick-card input:focus{border-color:var(--vs-text);box-shadow:0 0 15px rgba(255,255,255,.05)}
 .btn-save{width:100%;padding:16px;border:none;border-radius:8px;font-family:Orbitron;font-size:15px;font-weight:900;letter-spacing:2px;cursor:pointer;color:var(--vs-black);background:var(--vs-white);transition:all .2s;text-decoration:none;display:flex;align-items:center;justify-content:center;gap:10px;box-sizing:border-box}
 .btn-save:hover{background:var(--vs-text-light);transform:translateY(-2px);box-shadow:0 8px 25px rgba(255,255,255,.15)}
-.result-box{margin-top:15px;padding:20px;border-radius:8px;background:var(--vs-black);border:1px solid var(--vs-border);text-align:left;position:relative}
-.copy-btn{position:absolute;top:10px;right:10px;background:var(--vs-border);color:var(--vs-text-light);border:1px solid var(--vs-border-hover);padding:8px 16px;border-radius:6px;font-size:12px;font-weight:700;cursor:pointer;font-family:Orbitron;transition:.3s}
-.copy-btn:hover{background:var(--vs-white);color:var(--vs-black)}
-.code-preview{color:var(--vs-text-light);word-break:break-all;font-size:13px;line-height:1.5;margin-top:10px;white-space:pre-wrap}
-.manage-wrap{overflow-x:auto;width:100%}
-.manage-table{width:100%;min-width:600px;border-collapse:collapse;margin-top:15px;font-size:13px}
-.manage-table th{background:rgba(255,255,255,.02);color:var(--vs-text-light);padding:12px;text-align:left;border-bottom:1px solid var(--vs-border);font-family:Orbitron}
-.manage-table td{padding:14px 12px;border-bottom:1px solid rgba(255,255,255,.02);vertical-align:middle}
-.btn-action{padding:6px 10px;border:1px solid var(--vs-border);border-radius:6px;font-family:"JetBrains Mono";cursor:pointer;font-weight:700;font-size:11px;text-decoration:none;margin-right:5px;display:inline-flex;align-items:center;gap:6px;margin-bottom:5px;background:var(--vs-black);color:var(--vs-text-light);transition:.2s}
-.btn-action:hover{border-color:var(--vs-text);color:var(--vs-white)}
-.btn-delete:hover{border-color:#ef4444;color:#ef4444}
-.badge-admin{background:var(--vs-white);color:var(--vs-black);padding:2px 6px;border-radius:4px;font-size:10px;font-weight:700}
-.alert{padding:15px;background:rgba(255,255,255,.05);border:1px solid var(--vs-border);color:var(--vs-text-light);border-radius:8px;margin-bottom:20px;text-align:center;font-weight:700}
-.alert-success{background:rgba(255,255,255,.1);border:1px solid var(--vs-text);color:var(--vs-white)}
-.tos-list{text-align:left;margin-top:20px}
-.tos-item{margin-bottom:25px;padding-bottom:15px;border-bottom:1px solid var(--vs-border)}
-.tos-title{font-family:Orbitron;font-size:16px;color:var(--vs-white);margin-bottom:8px;font-weight:700}
-.tos-title span{color:var(--vs-text);margin-right:8px}
-.tos-desc{font-size:14px;color:var(--vs-text);line-height:1.6}
 .troll-screen{display:flex;flex-direction:column;align-items:center;justify-content:center;height:100vh;background:#000;color:#f00;font-family:monospace;text-align:center}
 .troll-text{font-size:50px;font-weight:bold;margin-bottom:20px;animation:glitch 1s linear infinite}
 .troll-sub{font-size:20px;color:#fff}
@@ -405,7 +344,7 @@ const baseHTML = (content, userSession = null) => {
   <body class="mobf-root">
     <div class="orb orb1"></div><div class="orb orb2"></div><div class="orb orb3"></div>
     <nav class="mobf-nav">
-      <a href="/" class="nav-logo"><i class="ph-fill ph-shield-check"></i> VANTASHIELD.COM</a>
+      <a href="/" class="nav-logo"><i class="ph-fill ph-shield-check"></i> VANTASHIELD</a>
       <button class="menu-toggle" onclick="toggleSidebar()"><i class="ph ph-list"></i></button>
     </nav>
     <div class="sidebar" id="sidebarNav">
@@ -419,67 +358,111 @@ const baseHTML = (content, userSession = null) => {
         <b style="color:var(--vs-white);font-size:16px;display:flex;justify-content:center;align-items:center;gap:6px">${escapeHTML(userSession).toUpperCase()} ${isAdmin ? '<i class="ph-fill ph-crown"></i>' : ''}</b>
       </div>
       <div class="sidebar-menu">
-        <a href="/"><i class="ph ph-house"></i> Creator Home</a>
-        <a href="/dashboard"><i class="ph ph-file-code"></i> Script Management</a>
-        <a href="/api-hosting"><i class="ph ph-cloud-arrow-up"></i> Tạo Web (Hosting)</a>
-        <a href="/ping"><i class="ph ph-pulse"></i> Ping Monitor</a>
-        <a href="/tos"><i class="ph ph-scroll"></i> Terms of Service</a>
+        <a href="/"><i class="ph ph-house"></i> Home</a>
+        <a href="/dashboard"><i class="ph ph-file-code"></i> Dashboard</a>
         <a href="/logout" style="color:var(--vs-text);margin-top:40px"><i class="ph ph-sign-out"></i> Logout</a>
       </div>
       ` : `
       <div class="user-badge"><i class="ph-fill ph-x-circle" style="margin-right:6px"></i> Not Logged In</div>
       <div class="sidebar-menu" style="text-align:center">
-        <p style="font-size:12px;color:var(--vs-text);margin-bottom:15px">Log in to securely save, edit, and manage your scripts globally.</p>
-        <a href="/login" style="background:var(--vs-white);color:var(--vs-black);font-size:13px;margin-bottom:10px;justify-content:center"><i class="ph ph-key"></i> Login</a>
-        <a href="/register" style="background:var(--vs-border);color:var(--vs-white);font-size:13px;margin-bottom:20px;justify-content:center"><i class="ph ph-user-plus"></i> Create Account</a>
-        <div style="border-top:1px solid var(--vs-border);padding-top:10px">
-          <a href="/api-hosting"><i class="ph ph-cloud-arrow-up"></i> Tạo Web (Hosting)</a>
-          <a href="/tos" style="color:var(--vs-text)"><i class="ph ph-scroll"></i> Terms of Service</a>
-        </div>
+        <a href="/login" style="background:var(--vs-white);color:var(--vs-black);font-size:13px;margin-bottom:10px;justify-content:center; padding: 12px; border-radius: 8px; text-decoration: none; display: flex;"><i class="ph ph-key"></i> Login to Dashboard</a>
       </div>
       `}
     </div>
     <main>${content}</main>
     <script>
       function toggleSidebar(){document.getElementById('sidebarNav').classList.toggle('active')}
-      function handleFileUpload(e){const f=e.target.files[0];if(!f)return;const r=new FileReader();r.onload=function(e){document.getElementById('codeArea').value=e.target.result};r.readAsText(f)}
-      function copyText(id,btn){const t=document.getElementById(id).innerText;const ta=document.createElement('textarea');ta.value=t;document.body.appendChild(ta);ta.select();try{document.execCommand('copy');btn.innerHTML='<i class="ph ph-check"></i> COPIED!';btn.style.background='var(--vs-white)';btn.style.color='var(--vs-black)';setTimeout(()=>{btn.innerHTML='<i class="ph ph-copy"></i> COPY';btn.style.background='var(--vs-border)';btn.style.color='var(--vs-text-light)'},2000)}catch(e){}document.body.removeChild(ta)}
-      function copyApiLink(name,btn){const url=window.location.origin+'/app/'+name;const ta=document.createElement('textarea');ta.value=url;document.body.appendChild(ta);ta.select();try{document.execCommand('copy');btn.innerHTML='<i class="ph ph-check"></i> COPIED!';btn.style.borderColor='var(--vs-white)';btn.style.color='var(--vs-white)';setTimeout(()=>{btn.innerHTML='<i class="ph ph-copy"></i> COPY LINK';btn.style.borderColor='var(--vs-border)';btn.style.color='var(--vs-text-light)'},2000)}catch(e){}document.body.removeChild(ta)}
-      function openApiLink(name){window.open(window.location.origin+'/app/'+name,'_blank')}
     </script>
     <script src="https://unpkg.com/@phosphor-icons/web"></script>
   </body></html>`;
 };
 
 // ============================================================================
-// CÁC ROUTE KHÁC ĐƯỢC GIỮ NGUYÊN (Dashboard, Hosting, Auth, Ping,...)
+// CÁC ROUTE GIAO DIỆN WEB (ĐÃ BỔ SUNG ĐỂ KHÔNG BỊ LỖI 404)
 // ============================================================================
-// [TÔI LƯỢC BỎ BỚT TRONG CHẾ ĐỘ HIỂN THỊ ĐỂ DỄ NHÌN, BẠN GIỮ NGUYÊN CODE CŨ TỪ ĐÂY ĐẾN TRƯỚC PHẦN RAW SCRIPT]
 
-app.post('/toggle-block', (req, res) => {
-  const user = getCookie(req, 'user_session');
-  if (user !== 'master1') return res.status(403).send('Unauthorized');
-  BLOCK_ALL = !BLOCK_ALL;
-  res.json({ blocked: BLOCK_ALL });
+// Trang chủ
+app.get('/', (req, res) => {
+    const user = getCookie(req, 'user_session');
+    const content = `
+        <div class="hero">
+            <h1>VANTASHIELD</h1>
+            <p style="color: var(--vs-text);">Hệ thống lưu trữ và bảo vệ Script Roblox chống ăn cắp (Anti-Skid) tuyệt đối.</p>
+        </div>
+        <div class="center-card-wrap">
+            <div class="quick-card" style="text-align: center;">
+                <i class="ph ph-shield-check" style="font-size: 60px; color: var(--vs-white); margin-bottom: 20px;"></i>
+                <h3 style="color: var(--vs-white);">Hệ thống đang hoạt động!</h3>
+                <p>Hãy đăng nhập để quản lý mã nguồn của bạn.</p>
+                <br>
+                ${user ? `<a href="/dashboard" class="btn-save">VÀO BẢNG ĐIỀU KHIỂN</a>` : `<a href="/login" class="btn-save">ĐĂNG NHẬP</a>`}
+            </div>
+        </div>
+    `;
+    res.send(baseHTML(content, user));
 });
 
-app.use('/app/:name', (req, res) => {
-  try {
-    const name = req.params.name;
-    const api = Array.from(apisDb.values()).find(a => a.name === name);
-    if (!api) return res.status(404).send('<h2>404 - KHÔNG TÌM THẤY WEB</h2>');
-    if (api.status !== 'ONLINE') return res.status(503).send('<h2>503 - WEB ĐANG TẮT</h2>');
-    const options = { hostname: '127.0.0.1', port: api.port, path: req.url || '/', method: req.method, headers: { ...req.headers, host: `127.0.0.1:${api.port}` } };
-    const proxyReq = http.request(options, (proxyRes) => { res.writeHead(proxyRes.statusCode, proxyRes.headers); proxyRes.pipe(res, { end: true }); });
-    req.pipe(proxyReq, { end: true });
-    proxyReq.on('error', () => res.status(502).send('502 - Bad Gateway'));
-  } catch (err) { res.status(500).send('Lỗi reverse proxy'); }
+// Trang Đăng nhập
+app.get('/login', (req, res) => {
+    const content = `
+        <div class="hero"><h1>LOGIN</h1></div>
+        <div class="center-card-wrap">
+            <div class="quick-card">
+                <form method="POST" action="/login">
+                    <label class="field-label" style="color: var(--vs-text-light); font-size: 12px;">Tên tài khoản</label>
+                    <input type="text" name="username" placeholder="Nhập admin (VD: master1)" required>
+                    <label class="field-label" style="color: var(--vs-text-light); font-size: 12px;">Mật khẩu</label>
+                    <input type="password" name="password" placeholder="Nhập mật khẩu" required>
+                    <button type="submit" class="btn-save"><i class="ph ph-sign-in"></i> ĐĂNG NHẬP</button>
+                </form>
+            </div>
+        </div>
+    `;
+    res.send(baseHTML(content, null));
 });
 
-// [... KẾT THÚC PHẦN ROUTE QUẢN TRỊ ...]
+// Xử lý Đăng nhập
+app.post('/login', (req, res) => {
+    const { username, password } = req.body;
+    const user = usersDb.get(username);
+    
+    if (user && user.password === password) {
+        // Lưu cookie đăng nhập
+        res.cookie('user_session', username, { maxAge: 1000 * 60 * 60 * 24 * 7, httpOnly: false });
+        res.redirect('/dashboard');
+    } else {
+        res.send(baseHTML(`<div class="hero"><h1 style="color: red;">SAI THÔNG TIN!</h1><br><a href="/login" style="color: white;">Quay lại</a></div>`, null));
+    }
+});
+
+// Đăng xuất
+app.get('/logout', (req, res) => {
+    res.clearCookie('user_session');
+    res.redirect('/');
+});
+
+// Bảng điều khiển (Dashboard)
+app.get('/dashboard', (req, res) => {
+    const user = getCookie(req, 'user_session');
+    if (!user) return res.redirect('/login');
+
+    const content = `
+        <div class="hero"><h1>DASHBOARD</h1></div>
+        <div class="center-card-wrap">
+            <div class="quick-card">
+                <h3 style="color: var(--vs-white);"><i class="ph ph-hand-waving"></i> Chào mừng, ${user}!</h3>
+                <p>Nơi đây bạn có thể thêm Form nhập Script, quản lý Key, v.v...</p>
+                <hr style="border: 1px solid var(--vs-border); margin: 20px 0;">
+                <p style="color: var(--vs-text); font-size: 13px;">(Giao diện quản lý Database nằm ở đây)</p>
+            </div>
+        </div>
+    `;
+    res.send(baseHTML(content, user));
+});
+
 
 // ============================================================================
-// RAW SCRIPT & ANTI-SKID (ĐÃ NÂNG CẤP MẠNH MẼ)
+// RAW SCRIPT CHO ROBLOX (ANTI-SKID)
 // ============================================================================
 app.all('/:creatorName/:fileName/refs/heads/main/:fileName2', (req, res) => {
   const { creatorName, fileName } = req.params;
@@ -489,18 +472,14 @@ app.all('/:creatorName/:fileName/refs/heads/main/:fileName2', (req, res) => {
     if ((val.fileName === fileName || key === fileName) && vc === creatorName) { data = val; break; }
   }
 
-  // Tắt cache để tránh rò rỉ script qua HTTP Proxies
   res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
 
   if (isRobloxExecutor(req)) {
     if (!data) return res.status(404).send('print("[VantaShield] Script Not Found")');
     res.setHeader('Content-Type', 'text/plain; charset=utf-8');
-    
-    // BỌC CODE BẰNG BOOTSTRAPPER ĐỂ LOAD CỰC NHANH VÀ CHỐNG SPY
     return res.send(generateSecureLua(data.code));
   }
   
-  // NẾU LÀ TRÌNH DUYỆT HOẶC SKIDDER
   return res.send(`<!DOCTYPE html><html><head><meta charset="UTF-8"><title>SKID DETECTED</title>${style}</head><body><div class="troll-screen"><div class="troll-text">SKID ALERT !</div><div class="troll-sub">Get out! Stealing source code is strictly prohibited.</div></div><script>setTimeout(()=>window.location.href="https://www.google.com",3000);</script></body></html>`);
 });
 
@@ -513,7 +492,6 @@ app.all('/v1/:id', (req, res) => {
   if (isRobloxExecutor(req)) {
     if (!data) return res.status(404).send('print("[VantaShield] Script Not Found")');
     res.setHeader('Content-Type', 'text/plain; charset=utf-8');
-    
     return res.send(generateSecureLua(data.code));
   }
   
@@ -521,3 +499,12 @@ app.all('/v1/:id', (req, res) => {
 });
 
 // ============================================================================
+// LỆNH KHỞI CHẠY SERVER (BẮT BUỘC PHẢI CÓ ĐỂ WEB SỐNG)
+// ============================================================================
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+    console.log(`=================================`);
+    console.log(`🛡️ VANTASHIELD ĐÃ KHỞI ĐỘNG TẠI PORT: ${PORT}`);
+    console.log(`🌐 Truy cập: http://localhost:${PORT}`);
+    console.log(`=================================`);
+});
