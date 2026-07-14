@@ -6,9 +6,7 @@ const { spawn, exec } = require('child_process');
 const http = require('http');
 const app = express();
 
-const DISCORD_INVITE_URL = 'https://discord.gg/C72jAuytN';
-
-// ===== KHỞI TẠO LƯU TRỮ DỮ LIỆU GIÁM SÁT PING =====
+// ===== Giám sát Ping =====
 const PING_FILE = './vantashield_ping.json';
 let pingDb = new Map();
 try { if (fs.existsSync(PING_FILE)) pingDb = new Map(Object.entries(JSON.parse(fs.readFileSync(PING_FILE,'utf8')))); } catch(e){}
@@ -19,6 +17,7 @@ async function doFetch(url){
   const fetchFn = global.fetch || (await import('node-fetch')).default;
   return fetchFn(url, { method: 'GET', headers: { 'User-Agent': 'VantaShield-Ping/1.0' }, redirect: 'follow' });
 }
+
 async function pingAll(){
   const jobs = [];
   pingDb.forEach((entry) => {
@@ -47,25 +46,16 @@ async function pingAll(){
 }
 setInterval(() => { pingAll().catch(()=>{}); }, 10000);
 
-// Tiện ích phụ trợ Lấy Cookie (Di chuyển lên đây để dùng chung)
-function getCookie(req, name) {
-    const cookies = req.headers.cookie || '';
-    const match = cookies.match(new RegExp('(^| )' + name + '=([^;]+)'));
-    return match ? decodeURIComponent(match[2]) : null;
-}
-
 // Lấy thông tin user session thống nhất
 function getSessionUser(req){
-  return getCookie(req, 'user_session');
+  return getCookie(req, 'user_session') || null;
 }
-
 
 // ============================================================================
 // HỆ THỐNG REVERSE PROXY NỘI BỘ (KHẮC PHỤC LỖI PORT TRÊN RENDER)
 // Phải đặt trước body-parser để không bị lỗi stream
 // ============================================================================
 let apisDb = new Map();
-
 app.use('/app/:name', (req, res) => {
     const name = req.params.name;
     const api = Array.from(apisDb.values()).find(a => a.name === name);
@@ -97,12 +87,11 @@ app.use('/app/:name', (req, res) => {
         method: req.method,
         headers: { ...req.headers, host: `127.0.0.1:${api.port}` }
     };
-
+    
     const proxyReq = http.request(options, (proxyRes) => {
         res.writeHead(proxyRes.statusCode, proxyRes.headers);
         proxyRes.pipe(res, { end: true });
     });
-
     req.pipe(proxyReq, { end: true });
 
     proxyReq.on('error', (e) => {
@@ -164,6 +153,13 @@ function saveUsers() { fs.writeFileSync(USERS_FILE, JSON.stringify(Object.fromEn
 function saveApis() { fs.writeFileSync(APIS_FILE, JSON.stringify(Object.fromEntries(apisDb))); }
 function saveChat() { fs.writeFileSync(CHAT_FILE, JSON.stringify(chatDb)); }
 
+// Tiện ích phụ trợ
+function getCookie(req, name) {
+    const cookies = req.headers.cookie || '';
+    const match = cookies.match(new RegExp('(^| )' + name + '=([^;]+)'));
+    return match ? decodeURIComponent(match[2]) : null;
+}
+
 function escapeHTML(str) {
     if (!str) return '';
     return str.replace(/[&<>'"]/g, tag => ({
@@ -202,7 +198,6 @@ const runningProcesses = {};
 const style = `
 <style>
 @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&family=Orbitron:wght@400;700;900&display=swap');
-
 body.mobf-root {
   --vs-bg: #030303; 
   --vs-card: #0a0a0a; 
@@ -212,79 +207,56 @@ body.mobf-root {
   --vs-text-light: #e0e0e0;
   --vs-white: #ffffff;
   --vs-black: #000000;
-  
   background: var(--vs-bg); color: var(--vs-text-light);
   font-family: "JetBrains Mono", ui-monospace, monospace;
   min-height: 100vh; margin: 0; overflow-x: hidden; position: relative;
 }
-
 .mobf-root::before {
   content: ""; position: fixed; inset: 0;
   background-image: linear-gradient(rgba(255, 255, 255, 0.02) 1px, transparent 1px), linear-gradient(90deg, rgba(255, 255, 255, 0.02) 1px, transparent 1px);
   background-size: 40px 40px; animation: gridMove 20s linear infinite; pointer-events: none; z-index: 0;
 }
 @keyframes gridMove { to { transform: translateY(40px); } }
-
-/* Hiệu ứng mờ nền */
 .orb { position: fixed; border-radius: 50%; filter: blur(100px); opacity: 0.03; pointer-events: none; z-index: 0; animation: orbFloat 10s ease-in-out infinite; }
 .orb1 { width: 500px; height: 500px; background: #ffffff; top: -100px; left: -100px; }
 .orb2 { width: 450px; height: 450px; background: #ffffff; bottom: -150px; right: -100px; animation-delay: -3s; }
 .orb3 { width: 300px; height: 300px; background: #ffffff; top: 40%; left: 30%; animation-delay: -6s; opacity: 0.01; }
 @keyframes orbFloat { 0%,100%{ transform:translate(0,0) scale(1);} 50%{ transform:translate(30px,-30px) scale(1.1);} }
-
 .mobf-nav {
   position: sticky; top: 0; z-index: 100; display: flex; align-items: center; justify-content: space-between;
   padding: 16px 32px; background: rgba(3, 3, 3, 0.85); backdrop-filter: blur(16px); border-bottom: 1px solid var(--vs-border);
 }
-.nav-logo {
-  font-family: "Orbitron", sans-serif; font-size: 22px; font-weight: 900; letter-spacing: 2px;
-  color: var(--vs-white); text-decoration: none; display: flex; align-items: center; gap: 8px;
-}
+.nav-logo { font-family: "Orbitron", sans-serif; font-size: 22px; font-weight: 900; letter-spacing: 2px; color: var(--vs-white); text-decoration: none; display: flex; align-items: center; gap: 8px; }
 .menu-toggle { font-size: 24px; background: none; border: none; color: var(--vs-white); cursor: pointer; transition: 0.3s; display: flex; align-items: center;}
 .menu-toggle:hover { color: var(--vs-text); transform: scale(1.1); }
-
-.sidebar {
-  position: fixed; top: 0; left: -300px; width: 280px; height: 100vh; background: #050505;
-  border-right: 1px solid var(--vs-border); z-index: 999; padding: 30px 20px; box-sizing: border-box;
-  transition: all 0.4s cubic-bezier(0.77, 0, 0.175, 1); box-shadow: 10px 0 30px rgba(0,0,0,0.9);
-}
+.sidebar { position: fixed; top: 0; left: -300px; width: 280px; height: 100vh; background: #050505; border-right: 1px solid var(--vs-border); z-index: 999; padding: 30px 20px; box-sizing: border-box; transition: all 0.4s cubic-bezier(0.77, 0, 0.175, 1); box-shadow: 10px 0 30px rgba(0,0,0,0.9); }
 .sidebar.active { left: 0; }
 .sidebar-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 30px; font-family: "Orbitron"; font-weight: bold; color: var(--vs-text-light); }
 .sidebar-close { background: none; border: none; color: var(--vs-text); font-size: 20px; cursor: pointer; display: flex;}
 .sidebar-close:hover { color: var(--vs-white); }
-
 .sidebar-menu a { display: flex; align-items: center; gap: 12px; padding: 14px 18px; color: var(--vs-text); text-decoration: none; border-radius: 8px; margin-bottom: 5px; transition: 0.3s; font-weight: bold;}
 .sidebar-menu a i { font-size: 18px; }
 .sidebar-menu a:hover { background: rgba(255, 255, 255, 0.05); color: var(--vs-white); }
 .user-badge { background: rgba(255,255,255,0.02); padding: 12px; border-radius: 8px; font-size: 12px; margin-bottom: 20px; border: 1px solid var(--vs-border); text-align: center; color: var(--vs-text);}
-
 .hero { position: relative; z-index: 1; text-align: center; padding: 40px 20px 20px; max-width: 860px; margin: 0 auto; }
 .hero-badge { display: inline-flex; align-items: center; gap: 8px; padding: 6px 16px; border: 1px solid var(--vs-border-hover); border-radius: 20px; font-size: 11px; letter-spacing: 2px; text-transform: uppercase; color: var(--vs-text-light); margin-bottom: 20px; background: rgba(255,255,255,0.02); }
 .hero h1 { font-family: "Orbitron", sans-serif; font-size: clamp(26px, 5vw, 42px); font-weight: 900; letter-spacing: 2px; margin: 0 0 10px 0; color: var(--vs-white);}
-
 .center-card-wrap { position: relative; z-index: 1; max-width: 800px; margin: 0 auto 80px; padding: 0 20px; }
 .quick-card { background: var(--vs-card); border: 1px solid var(--vs-border); border-radius: 12px; padding: 32px; position: relative; overflow: hidden; box-shadow: 0 10px 40px rgba(0,0,0,0.8); }
-
 .header-flex { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; flex-wrap: wrap; gap: 10px;}
 .field-label { font-size: 13px; letter-spacing: 2px; text-transform: uppercase; color: var(--vs-text-light); font-weight: bold; margin: 0 0 10px 0; display: block;}
-
 .quick-card input[type="text"], .quick-card input[type="password"] { width: 100%; padding: 14px; background: var(--vs-black); border: 1px solid var(--vs-border); border-radius: 8px; color: var(--vs-white); font-family: "JetBrains Mono", monospace; font-size: 14px; box-sizing: border-box; outline: none; transition: all .3s; margin-bottom: 20px; }
 .quick-card input:focus, .quick-card textarea:focus { border-color: var(--vs-text); box-shadow: 0 0 15px rgba(255, 255, 255, 0.05); }
-
 .btn-upload { background: rgba(255,255,255,0.02); color: var(--vs-text); border: 1px dashed var(--vs-border-hover); padding: 10px 15px; border-radius: 8px; font-size: 12px; cursor: pointer; transition: all 0.3s; font-family: "Orbitron"; display: inline-flex; align-items: center; gap: 8px; font-weight: bold; }
 .btn-upload:hover { background: rgba(255,255,255,0.05); color: var(--vs-white); border-color: var(--vs-text); }
 input[type="file"] { display: none; }
-
 .quick-card textarea { width: 100%; height: 250px; background: var(--vs-black); border: 1px solid var(--vs-border); border-radius: 8px; color: var(--vs-text-light); font-family: "JetBrains Mono", monospace; font-size: 13px; padding: 14px; box-sizing: border-box; outline: none; transition: all .3s; resize: none; margin-bottom: 15px; }
-
 .btn-save { width: 100%; padding: 16px; border: none; border-radius: 8px; font-family: "Orbitron"; font-size: 15px; font-weight: 900; letter-spacing: 2px; cursor: pointer; color: var(--vs-black); background: var(--vs-white); transition: all .2s; text-decoration:none; display:flex; align-items:center; justify-content:center; gap: 10px; box-sizing:border-box;}
 .btn-save:hover { background: var(--vs-text-light); transform: translateY(-2px); box-shadow: 0 8px 25px rgba(255, 255, 255, 0.15); }
-
 .result-box { margin-top: 15px; padding: 20px; border-radius: 8px; background: var(--vs-black); border: 1px solid var(--vs-border); text-align: left; position: relative;}
 .copy-btn { position: absolute; top: 10px; right: 10px; background: var(--vs-border); color: var(--vs-text-light); border: 1px solid var(--vs-border-hover); padding: 8px 16px; border-radius: 6px; font-size: 12px; font-weight: bold; cursor: pointer; font-family: "Orbitron"; transition: 0.3s; }
 .copy-btn:hover { background: var(--vs-white); color: var(--vs-black); }
 .code-preview { color: var(--vs-text-light); word-break: break-all; font-size: 13px; line-height: 1.5; margin-top: 10px; white-space: pre-wrap; }
-
 /* BẢNG QUẢN LÝ */
 .manage-wrap { overflow-x: auto; width: 100%; }
 .manage-table { width: 100%; min-width: 600px; border-collapse: collapse; margin-top: 15px; font-size: 13px; }
@@ -294,7 +266,6 @@ input[type="file"] { display: none; }
 .btn-action:hover { border-color: var(--vs-text); color: var(--vs-white); }
 .btn-delete:hover { border-color: #ef4444; color: #ef4444; }
 .badge-admin { background: var(--vs-white); color: var(--vs-black); padding: 2px 6px; border-radius: 4px; font-size: 10px; font-weight: bold; }
-
 /* KHU VỰC TRÒ CHUYỆN */
 .chat-box { background: var(--vs-black); border: 1px solid var(--vs-border); border-radius: 8px; height: 400px; display: flex; flex-direction: column; overflow: hidden; }
 .chat-messages { flex: 1; padding: 20px; overflow-y: auto; display: flex; flex-direction: column; gap: 15px; scroll-behavior: smooth;}
@@ -308,7 +279,6 @@ input[type="file"] { display: none; }
 .chat-input:focus { border-color: var(--vs-text); }
 .btn-send { background: var(--vs-white); border: none; color: var(--vs-black); padding: 0 20px; height: 45px; border-radius: 8px; font-family: "Orbitron"; font-weight: bold; cursor: pointer; transition: 0.3s; display:flex; align-items:center; gap:8px;}
 .btn-send:hover { background: var(--vs-text-light); }
-
 /* TERMINAL DEPLOYMENT SYSTEM */
 #loader-overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.9); z-index: 99999; flex-direction: column; justify-content: center; align-items: center; }
 .terminal-window { width: 90%; max-width: 600px; background: #000; border: 1px solid var(--vs-border-hover); border-radius: 8px; overflow: hidden; box-shadow: 0 0 30px rgba(255,255,255,0.05); }
@@ -319,7 +289,6 @@ input[type="file"] { display: none; }
 .blink { animation: blinker 1s linear infinite; }
 @keyframes fadeIn { to { opacity: 1; } }
 @keyframes blinker { 50% { opacity: 0; } }
-
 /* MÀN HÌNH TROLL ANTI-SKID */
 .cyber-text-alert { font-family: 'Orbitron', sans-serif; font-size: 13px; font-weight: bold; color: var(--vs-white); text-shadow: 0 0 8px rgba(255,255,255,0.3); letter-spacing: 1px; animation: pulseGlow 2s infinite; display:flex; align-items:center; gap:8px;}
 @keyframes pulseGlow { 0%, 100% { opacity: 1; text-shadow: 0 0 8px rgba(255,255,255,0.3); } 50% { opacity: 0.7; text-shadow: 0 0 15px rgba(255,255,255,0.6); } }
@@ -329,7 +298,6 @@ input[type="file"] { display: none; }
 @keyframes shake { 0% { transform: translate(2px, 2px); } 50% { transform: translate(-2px, -2px); } 100% { transform: translate(2px, -2px); } }
 .alert { padding: 15px; background: rgba(255,255,255,0.05); border: 1px solid var(--vs-border); color: var(--vs-text-light); border-radius: 8px; margin-bottom: 20px; text-align: center; font-weight: bold; }
 .alert-success { background: rgba(255,255,255,0.1); border: 1px solid var(--vs-text); color: var(--vs-white); }
-
 /* ĐIỀU KHOẢN */
 .tos-list { text-align: left; margin-top: 20px; }
 .tos-item { margin-bottom: 25px; padding-bottom: 15px; border-bottom: 1px solid var(--vs-border); }
@@ -337,10 +305,7 @@ input[type="file"] { display: none; }
 .tos-title span { color: var(--vs-text); margin-right: 8px; }
 .tos-desc { font-size: 14px; color: var(--vs-text); line-height: 1.6; }
 </style>
-
-<!-- Phosphor Icons Library -->
 <script src="https://unpkg.com/@phosphor-icons/web"></script>
-
 <script>
 function toggleSidebar() { document.getElementById('sidebarNav').classList.toggle('active'); }
 function handleFileUpload(event) {
@@ -357,12 +322,12 @@ function copyText(elementId, btnElement) {
     try {
         document.execCommand('copy');
         btnElement.innerHTML = '<i class="ph ph-check"></i> COPIED!'; 
-        btnElement.style.background = 'var(--vs-white)'; btnElement.style.color = 'var(--vs-black)';
+        btnElement.style.background = 'var(--vs-white)';
+        btnElement.style.color = 'var(--vs-black)';
         setTimeout(() => { btnElement.innerHTML = '<i class="ph ph-copy"></i> COPY'; btnElement.style.background = 'var(--vs-border)'; btnElement.style.color = 'var(--vs-text-light)'; }, 2000);
     } catch (err) { console.error(err); }
     document.body.removeChild(textArea);
 }
-
 function copyApiLink(projectName, btnElement) {
     const url = window.location.origin + '/app/' + projectName;
     const textArea = document.createElement("textarea");
@@ -375,15 +340,12 @@ function copyApiLink(projectName, btnElement) {
     } catch(e) {}
     document.body.removeChild(textArea);
 }
-
 function openApiLink(projectName) {
     const url = window.location.origin + '/app/' + projectName;
     window.open(url, '_blank');
 }
 
-// ============================================================================
 // HỆ THỐNG TỰ ĐỘNG DỊCH TIẾNG VIỆT
-// ============================================================================
 const viDict = {
     "NAVIGATION": "ĐIỀU HƯỚNG",
     "Logged in as:": "Đăng nhập với tư cách:",
@@ -412,18 +374,15 @@ const viDict = {
     "Enter username...": "Nhập tài khoản...",
     "Enter password...": "Nhập mật khẩu..."
 };
-
 async function autoTranslateToVN() {
     try {
         let isVN = false;
         if (Intl.DateTimeFormat().resolvedOptions().timeZone === 'Asia/Ho_Chi_Minh') isVN = true;
-        
         if (!isVN) {
             const res = await fetch('https://ipapi.co/json/');
             const data = await res.json();
             if (data.country === 'VN') isVN = true;
         }
-
         if (isVN) {
             const walk = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null, false);
             let node;
@@ -439,7 +398,6 @@ async function autoTranslateToVN() {
         }
     } catch(e) { console.log("Translation check bypassed."); }
 }
-
 document.addEventListener('DOMContentLoaded', autoTranslateToVN);
 </script>
 `;
@@ -468,7 +426,8 @@ const baseHTML = (content, userSession = null) => {
             <span>NAVIGATION</span>
             <button class="sidebar-close" onclick="toggleSidebar()"><i class="ph ph-x"></i></button>
         </div>
-        ${userSession ? `
+        ${userSession ?
+        `
             <div class="user-badge">
                 <div style="display:flex; justify-content:center; align-items:center; gap:6px; margin-bottom:8px;">
                     <i class="ph-fill ph-check-circle" style="color: var(--vs-white);"></i> Logged in as:
@@ -484,7 +443,6 @@ const baseHTML = (content, userSession = null) => {
                 <a href="/ping" style="color:var(--vs-white);"><i class="ph ph-pulse"></i> Ping Monitor</a>
                 <a href="/chat-vn"><i class="ph ph-chat-circle-dots"></i> VN Chat</a>
                 <a href="/chat-global"><i class="ph ph-globe"></i> Global Chat</a>
-                <a href="${DISCORD_INVITE_URL}" target="_blank" style="color:#5865F2;"><i class="ph-fill ph-discord-logo"></i> Discord Server</a>
                 <a href="/tos"><i class="ph ph-scroll"></i> Terms of Service</a>
                 <a href="/logout" style="color: var(--vs-text); margin-top: 40px;"><i class="ph ph-sign-out"></i> Logout</a>
             </div>
@@ -508,7 +466,6 @@ const baseHTML = (content, userSession = null) => {
 
     <main>${content}</main>
 
-    <!-- LOADING OVERLAY CHO TẠO WEB -->
     <div id="loader-overlay">
         <div class="terminal-window">
             <div class="terminal-header">
@@ -523,6 +480,7 @@ const baseHTML = (content, userSession = null) => {
 </body>
 </html>
 `};
+
 
 // ============================================================================
 // 2. TẠO WEB HOSTING PROXY
@@ -567,12 +525,9 @@ app.get('/api-hosting', (req, res) => {
             <h1><span class="line2">TẠO WEB (HOSTING)</span></h1>
             <p style="color:var(--vs-text); font-family:'JetBrains Mono'; font-size:14px;">Khởi tạo API/Web từ kho Github hoặc tạo thủ công với Proxy bảo mật.</p>
         </section>
-
         ${msg ? `<div class="center-card-wrap"><div class="alert alert-success"><i class="ph-fill ph-check-circle" style="margin-right:8px;"></i> ${escapeHTML(msg)}</div></div>` : ''}
 
         <div class="center-card-wrap" style="max-width: 1000px; display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 20px;">
-            
-            <!-- OPTION 1: DEPLOY FROM GITHUB -->
             <div class="quick-card" style="padding: 25px;">
                 <div class="field-label" style="color: var(--vs-white); font-size: 15px; margin-bottom: 20px; text-align:center;">
                     <i class="ph ph-github-logo" style="font-size: 28px; margin-bottom: 8px; display: block;"></i> DEPLOY TỪ GITHUB
@@ -580,17 +535,13 @@ app.get('/api-hosting', (req, res) => {
                 <form id="githubForm" onsubmit="handleAjaxDeploy(event, 'github')">
                     <label class="field-label">TÊN DỰ ÁN WEB</label>
                     <input type="text" name="project_name" placeholder="vidu: my-github-web" required pattern="[a-z0-9-]+" title="Chữ thường, số và gạch ngang">
-                    
                     <label class="field-label">LINK KHO GITHUB (Public)</label>
                     <input type="text" name="repo_url" placeholder="https://github.com/user/repo.git" required>
-                    
                     <p style="font-size: 11px; color: var(--vs-text); margin-top: -5px; margin-bottom: 15px;">Hệ thống sẽ tự động git clone, chạy npm install và start server.js.</p>
-                    
                     <button type="submit" class="btn-save" style="margin-top: 10px;"><i class="ph ph-rocket-launch"></i> DEPLOY TỪ GITHUB</button>
                 </form>
             </div>
 
-            <!-- OPTION 2: CREATE DIRECTLY -->
             <div class="quick-card" style="padding: 25px;">
                 <div class="field-label" style="color: var(--vs-white); font-size: 15px; margin-bottom: 20px; text-align:center;">
                     <i class="ph ph-terminal-window" style="font-size: 28px; margin-bottom: 8px; display: block;"></i> TẠO TRỰC TIẾP TẠI WEB
@@ -598,7 +549,6 @@ app.get('/api-hosting', (req, res) => {
                 <form id="manualForm" onsubmit="handleAjaxDeploy(event, 'manual')">
                     <label class="field-label">TÊN DỰ ÁN WEB</label>
                     <input type="text" name="project_name" placeholder="vidu: my-local-web" required pattern="[a-z0-9-]+" title="Chữ thường, số và gạch ngang">
-                    
                     <label class="field-label"><i class="ph ph-file-code"></i> package.json</label>
                     <textarea name="pkg_json" style="height: 100px; font-family: 'JetBrains Mono'; margin-bottom: 15px;">{
   "name": "my-web",
@@ -608,14 +558,12 @@ app.get('/api-hosting', (req, res) => {
     "express": "^4.19.2"
   }
 }</textarea>
-                    
                     <label class="field-label"><i class="ph ph-file-js"></i> server.js</label>
                     <textarea name="srv_js" style="height: 150px; font-family: 'JetBrains Mono'; margin-bottom: 15px;">const express = require('express');
 const app = express();
 app.get('/', (req, res) => res.send('<h1>Web tạo thành công!</h1>'));
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log('Running'));</textarea>
-                    
                     <button type="submit" class="btn-save"><i class="ph ph-hammer"></i> TẠO WEB BẰNG TAY</button>
                 </form>
             </div>
@@ -649,12 +597,10 @@ app.listen(PORT, () => console.log('Running'));</textarea>
             const form = e.target;
             const formData = new FormData(form);
             const data = Object.fromEntries(formData.entries());
-
             const overlay = document.getElementById('loader-overlay');
             const term = document.getElementById('term-body');
             overlay.style.display = 'flex';
             term.innerHTML = '';
-
             const appendTerm = (text, delay = 0) => {
                 return new Promise(resolve => {
                     setTimeout(() => {
@@ -666,7 +612,6 @@ app.listen(PORT, () => console.log('Running'));</textarea>
                     }, delay);
                 });
             };
-
             await appendTerm('> System: Đang kiểm tra dữ liệu đầu vào...', 500);
             await appendTerm('> System: Đang cấp phát thư mục [ ' + data.project_name + ' ]...', 800);
             
@@ -686,7 +631,6 @@ app.listen(PORT, () => console.log('Running'));</textarea>
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify(data)
                 });
-                
                 const result = await response.json();
                 
                 if (result.success) {
@@ -695,7 +639,6 @@ app.listen(PORT, () => console.log('Running'));</textarea>
                     await appendTerm('<br><span style="color:var(--vs-white); font-size:16px; font-weight:bold;">[ TẠO WEB THÀNH CÔNG ]</span>', 800);
                     await appendTerm('Link proxy: ' + window.location.origin + '/app/' + result.name, 500);
                     await appendTerm('Hệ thống tải lại trang sau 3 giây...', 1000);
-                    
                     setTimeout(() => {
                         window.location.href = '/api-hosting?msg=Tạo web thành công!';
                     }, 3000);
@@ -715,28 +658,23 @@ app.listen(PORT, () => console.log('Running'));</textarea>
 app.post('/api-deploy-ajax', async (req, res) => {
     const user = getCookie(req, 'user_session');
     if (!user) return res.json({ success: false, message: 'Bạn chưa đăng nhập.' });
-
     let { project_name, pkg_json, srv_js } = req.body;
     project_name = project_name.trim().toLowerCase().replace(/[^a-z0-9-]/g, '');
     if (!project_name) return res.json({ success: false, message: 'Tên dự án không hợp lệ.' });
-
     let nameExists = Array.from(apisDb.values()).some(api => api.name === project_name);
     if (nameExists) return res.json({ success: false, message: 'Tên dự án này đã tồn tại!' });
 
     const apiId = crypto.randomBytes(4).toString('hex');
     const port = getFreePort();
     const apiDir = path.join(__dirname, 'hosted_apis', apiId);
-
     try {
         if (!fs.existsSync(path.join(__dirname, 'hosted_apis'))) fs.mkdirSync(path.join(__dirname, 'hosted_apis'));
         fs.mkdirSync(apiDir, { recursive: true });
-
         fs.writeFileSync(path.join(apiDir, 'package.json'), pkg_json);
         fs.writeFileSync(path.join(apiDir, 'server.js'), srv_js);
 
         apisDb.set(apiId, { id: apiId, owner: user, name: project_name, port: port, status: 'OFFLINE', createdAt: Date.now() });
         saveApis();
-
         exec('npm install', { cwd: apiDir }, (error, stdout, stderr) => {
             if (error) return res.json({ success: false, message: 'Lỗi npm install. Kiểm tra package.json' });
             startApiProcess(apiId);
@@ -751,33 +689,26 @@ app.post('/api-deploy-ajax', async (req, res) => {
 app.post('/api-deploy-github-ajax', async (req, res) => {
     const user = getCookie(req, 'user_session');
     if (!user) return res.json({ success: false, message: 'Bạn chưa đăng nhập.' });
-
     let { project_name, repo_url } = req.body;
     project_name = project_name.trim().toLowerCase().replace(/[^a-z0-9-]/g, '');
     if (!project_name) return res.json({ success: false, message: 'Tên dự án không hợp lệ.' });
-    
     repo_url = repo_url.trim().replace(/"/g, ''); 
     if (!repo_url.startsWith('http') || !repo_url.includes('github.com')) {
         return res.json({ success: false, message: 'Link Repo GitHub không hợp lệ.' });
     }
-
     let nameExists = Array.from(apisDb.values()).some(api => api.name === project_name);
     if (nameExists) return res.json({ success: false, message: 'Tên dự án này đã tồn tại!' });
 
     const apiId = crypto.randomBytes(4).toString('hex');
     const port = getFreePort();
     const apiDir = path.join(__dirname, 'hosted_apis', apiId);
-
     try {
         if (!fs.existsSync(path.join(__dirname, 'hosted_apis'))) fs.mkdirSync(path.join(__dirname, 'hosted_apis'));
         fs.mkdirSync(apiDir, { recursive: true });
-
         exec(`git clone "${repo_url}" .`, { cwd: apiDir }, (errClone, stdoutC, stderrC) => {
             if (errClone) return res.json({ success: false, message: 'Không thể Clone GitHub. Repo có thể bị Private hoặc sai link.' });
-
             apisDb.set(apiId, { id: apiId, owner: user, name: project_name, port: port, status: 'OFFLINE', createdAt: Date.now() });
             saveApis();
-
             if (fs.existsSync(path.join(apiDir, 'package.json'))) {
                 exec('npm install', { cwd: apiDir }, (error, stdout, stderr) => {
                     startApiProcess(apiId);
@@ -793,25 +724,20 @@ app.post('/api-deploy-github-ajax', async (req, res) => {
     }
 });
 
-// Khởi chạy server con Node.js
 function startApiProcess(apiId) {
     const api = apisDb.get(apiId);
     if (!api) return;
-
     const apiDir = path.join(__dirname, 'hosted_apis', apiId);
-    
     try {
         const child = spawn('node', ['server.js'], {
             cwd: apiDir,
             env: { ...process.env, PORT: api.port } 
         });
-
         runningProcesses[apiId] = child;
         api.status = 'ONLINE';
         api.pid = child.pid;
         apisDb.set(apiId, api);
         saveApis();
-
         child.on('exit', (code) => {
             console.log(`[API HOSTING] Project ${api.name} exited.`);
             if (apisDb.has(apiId)) {
@@ -823,16 +749,13 @@ function startApiProcess(apiId) {
             }
             delete runningProcesses[apiId];
         });
-    } catch(e) {
-        console.error("Lỗi khởi tạo Process", e);
-    }
+    } catch(e) { console.error("Lỗi khởi tạo Process", e); }
 }
 
 app.post('/api-action/:action/:id', (req, res) => {
     const user = getCookie(req, 'user_session');
     const isAdmin = user === 'master1';
     const { action, id } = req.params;
-    
     const api = apisDb.get(id);
     if (!api || (!isAdmin && api.owner !== user)) return res.redirect('/api-hosting');
 
@@ -861,7 +784,7 @@ app.post('/api-action/:action/:id', (req, res) => {
 });
 
 // ============================================================================
-// 3. KHU VỰC TRÒ CHUYỆN TOÀN CẦU VÀ VIỆT NAM (PERSISTENT API)
+// 3. KHU VỰC TRÒ CHUYỆN TOÀN CẦU VÀ VIỆT NAM
 // ============================================================================
 app.get('/api/chat/:room', (req, res) => {
     const room = req.params.room;
@@ -872,7 +795,6 @@ app.get('/api/chat/:room', (req, res) => {
 app.post('/api/chat/:room', (req, res) => {
     const room = req.params.room;
     if (room !== 'vn' && room !== 'global') return res.status(400).json({ error: 'Invalid room' });
-    
     const user = getCookie(req, 'user_session') || 'Anonymous';
     const { message } = req.body;
     if (!message || message.trim() === '') return res.status(400).json({ error: 'Empty message' });
@@ -880,7 +802,6 @@ app.post('/api/chat/:room', (req, res) => {
     chatDb[room].push({ user: user, message: message.trim(), time: Date.now() });
     if (chatDb[room].length > 150) chatDb[room].shift();
     saveChat();
-    
     res.json({ success: true });
 });
 
@@ -905,13 +826,11 @@ const chatTemplate = (title, badgeClass, welcomeMsg, roomName, userSession) => `
     <script>
         let currentRoom = '${roomName}';
         let currentUser = '${userSession || 'Anonymous'}';
-
         function escapeHTML(str) {
             return (str || '').replace(/[&<>'"]/g, tag => ({
                 '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;'
             }[tag] || tag));
         }
-
         async function fetchChat() {
             try {
                 const res = await fetch('/api/chat/' + currentRoom);
@@ -919,40 +838,27 @@ const chatTemplate = (title, badgeClass, welcomeMsg, roomName, userSession) => `
                 renderChat(data.chat);
             } catch (e) {}
         }
-
         function renderChat(chatList) {
             const chatArea = document.getElementById('chatArea');
             const isScrolledToBottom = chatArea.scrollHeight - chatArea.clientHeight <= chatArea.scrollTop + 50;
-            
             chatArea.innerHTML = '<div class="chat-msg msg-bot">${welcomeMsg}</div>';
             chatList.forEach(c => {
                 const isMe = c.user === currentUser;
                 const msgDiv = document.createElement('div');
                 msgDiv.innerHTML = '<b style="color:' + (isMe ? 'var(--vs-white)' : 'var(--vs-text)') + '; font-family:Orbitron; font-size: 12px; display:flex; align-items:center; gap:4px;"><i class="ph-fill ph-user"></i> ' + escapeHTML(c.user) + '</b><br><span style="margin-top:4px; display:block;">' + escapeHTML(c.message) + '</span>';
-                
-                if (isMe) {
-                    msgDiv.className = 'chat-msg msg-user';
-                } else {
-                    msgDiv.className = 'chat-msg msg-bot';
-                }
+                msgDiv.className = isMe ? 'chat-msg msg-user' : 'chat-msg msg-bot';
                 chatArea.appendChild(msgDiv);
             });
-
-            if (isScrolledToBottom) {
-                chatArea.scrollTop = chatArea.scrollHeight;
-            }
+            if (isScrolledToBottom) chatArea.scrollTop = chatArea.scrollHeight;
         }
-
         async function sendUI() {
             const input = document.getElementById('chatInput');
             const val = input.value.trim();
             if(!val) return;
             input.value = '';
-            
             const chatArea = document.getElementById('chatArea');
             chatArea.innerHTML += '<div class="chat-msg msg-user"><b style="color:var(--vs-white); font-family:Orbitron; font-size: 12px; display:flex; align-items:center; gap:4px;"><i class="ph-fill ph-user"></i> ' + escapeHTML(currentUser) + '</b><br><span style="margin-top:4px; display:block;">' + escapeHTML(val) + '</span></div>';
             chatArea.scrollTop = chatArea.scrollHeight;
-
             await fetch('/api/chat/' + currentRoom, {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
@@ -960,7 +866,6 @@ const chatTemplate = (title, badgeClass, welcomeMsg, roomName, userSession) => `
             });
             fetchChat();
         }
-
         setInterval(fetchChat, 3000);
         setTimeout(fetchChat, 200);
     </script>
@@ -978,7 +883,23 @@ app.get('/chat-global', (req, res) => {
 
 
 // ============================================================================
-// 4. CÁC TUYẾN ĐƯỜNG ĐIỀU HƯỚNG CHÍNH (HOME, DASHBOARD, LOGIN, TOS, RAW)
+// 4. BẢO MẬT ĐIỀU HƯỚNG VÀ KIỂM TRA ĐĂNG NHẬP
+// ============================================================================
+const OPEN_PATHS = ['/login','/register','/logout','/favicon.ico'];
+app.use((req,res,next) => {
+  if (req.path.startsWith('/app/')) return next();
+  if (req.path.startsWith('/v1/')) return next();
+  if (req.path.match(/^\/[^/]+\/[^/]+\/refs\/heads\/main\//)) return next();
+  if (OPEN_PATHS.some(p => req.path.startsWith(p)) || req.path === '/') return next();
+  
+  const u = getSessionUser(req);
+  const RESTRICTED = ['/dashboard','/api-hosting','/ping','/chat-vn','/chat-global','/edit','/delete','/download','/create'];
+  if (RESTRICTED.some(p => req.path.startsWith(p)) && !u) return res.redirect('/login');
+  next();
+});
+
+// ============================================================================
+// 5. CÁC TUYẾN ĐƯỜNG ĐIỀU HƯỚNG CHÍNH (HOME, DASHBOARD, LOGIN, TOS, RAW)
 // ============================================================================
 app.get('/', (req, res) => {
     const user = getCookie(req, 'user_session');
@@ -1001,7 +922,6 @@ app.get('/', (req, res) => {
                     
                     <label class="field-label" style="margin-top: 15px;"><i class="ph ph-text-t"></i> CUSTOM FILE NAME (OPTIONAL)</label>
                     <input type="text" name="fileName" placeholder="e.g. auto-farm" pattern="[a-zA-Z0-9-_]+" title="Only letters, numbers, dashes and underscores">
-
                     <button type="submit" class="btn-save"><i class="ph-fill ph-lock-key"></i> SECURE & GENERATE RAW LINK</button>
                 </form>
             </div>
@@ -1014,7 +934,6 @@ app.post('/create', (req, res) => {
     const { code, fileName } = req.body;
     
     const id = crypto.randomBytes(4).toString('hex');
-    
     const safeFileName = (fileName && fileName.trim() !== '') ? fileName.trim().replace(/[^a-zA-Z0-9_-]/g, '') : id;
     const rawCreatorName = user === 'guest_anonymous' ? 'anonymous' : user;
 
@@ -1025,7 +944,7 @@ app.post('/create', (req, res) => {
     const protocol = req.headers['x-forwarded-proto'] || req.protocol;
     const rawLink = `${protocol}://${host}/${rawCreatorName}/${safeFileName}/refs/heads/main/${safeFileName}`;
     const loadstringCommand = `loadstring(game:HttpGet("${rawLink}"))()`;
-
+    
     res.send(baseHTML(`
         <section class="hero"><h1><span class="line2">RAW GENERATED!</span></h1></section>
         <div class="center-card-wrap" style="max-width: 650px;">
@@ -1035,7 +954,6 @@ app.post('/create', (req, res) => {
                     <button type="button" class="copy-btn" onclick="copyText('loadstring-text', this)"><i class="ph ph-copy"></i> COPY</button>
                     <div class="code-preview" id="loadstring-text">${loadstringCommand}</div>
                 </div>
-                
                 <br>
                 <a href="/" class="btn-save" style="background: var(--vs-black); color: var(--vs-text-light); border: 1px solid var(--vs-border);"><i class="ph ph-plus"></i> CREATE ANOTHER</a>
             </div>
@@ -1105,8 +1023,7 @@ app.post('/login', (req, res) => {
 
     if (user && user.password === password) {
         res.cookie('user_session', cleanUsername, { maxAge: 1000 * 60 * 60 * 24 * 7, httpOnly: true });
-        // Đã xóa cơ chế chuyển hướng sang trang xác minh Discord
-        res.redirect('/'); 
+        res.redirect('/dashboard');
     } else {
         res.redirect('/login?error=Invalid username or password!');
     }
@@ -1119,18 +1036,6 @@ app.get('/logout', (req, res) => {
 
 app.get('/dashboard', (req, res) => {
     const user = getCookie(req, 'user_session');
-    if (!user) {
-        return res.send(baseHTML(`
-            <div class="center-card-wrap" style="margin-top:80px; max-width:500px; text-align:center;">
-                <div class="quick-card">
-                    <h2 style="color:var(--vs-white); font-family:'Orbitron'"><i class="ph-fill ph-warning" style="color:var(--vs-text);"></i> ACCESS DENIED</h2>
-                    <p style="color:var(--vs-text); font-size:14px; margin-bottom: 20px;">You must log in to access the script management panel.</p>
-                    <a href="/login" class="btn-save"><i class="ph ph-key"></i> LOGIN NOW</a>
-                </div>
-            </div>
-        `));
-    }
-
     const isAdmin = user === 'master1';
     const SEVEN_DAYS = 7 * 24 * 60 * 60 * 1000;
     const now = Date.now();
@@ -1214,7 +1119,6 @@ app.get('/edit/:id', (req, res) => {
 
     const rawCreatorName = scriptData.owner === 'guest_anonymous' ? 'anonymous' : scriptData.owner;
     const safeFileName = scriptData.fileName || id;
-    
     const host = req.get('host');
     const protocol = req.headers['x-forwarded-proto'] || req.protocol;
     const rawLink = `${protocol}://${host}/${rawCreatorName}/${safeFileName}/refs/heads/main/${safeFileName}`;
@@ -1274,7 +1178,6 @@ app.get('/delete/:id', (req, res) => {
     res.redirect('/dashboard');
 });
 
-// Điều khoản sử dụng dịch vụ
 app.get('/tos', (req, res) => {
     const user = getCookie(req, 'user_session');
     res.send(baseHTML(`
@@ -1308,7 +1211,7 @@ app.get('/tos', (req, res) => {
 // HỆ THỐNG TRUY XUẤT RAW SCRIPT & ANTI-SKID BẢO MẬT TUYỆT ĐỐI
 // ============================================================================
 
-// Định dạng tệp tin giả lập Github: /creatorName/fileName/refs/heads/main/fileName
+// Tối ưu hóa Cache-Control giúp Loadscript chạy 100% siêu mượt, loại bỏ delay
 app.all('/:creatorName/:fileName/refs/heads/main/:fileName2', (req, res) => {
     const { creatorName, fileName } = req.params;
     
@@ -1325,10 +1228,11 @@ app.all('/:creatorName/:fileName/refs/heads/main/:fileName2', (req, res) => {
     if (isRobloxExecutor(req)) {
         if (!data) return res.status(404).send('print("VantaShield: Script Not Found")');
         res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+        // Thêm headers chống cache để load cực nhanh mà không bị lưu mã cũ
+        res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate'); 
         return res.send(data.code);
     }
 
-    // ĐỐI VỚI TRÌNH DUYỆT THƯỜNG TRUY CẬP -> BẮT BUỘC RA MÀN HÌNH TROLL BÁO ĐỘNG (SKID ALERT)
     if (!data) {
         return res.send(`
             <!DOCTYPE html>
@@ -1360,7 +1264,7 @@ app.all('/:creatorName/:fileName/refs/heads/main/:fileName2', (req, res) => {
     `);
 });
 
-// Cơ chế tương thích API v1 cũ
+// Tương thích API v1 (đã thêm anti-cache)
 app.all('/v1/:id', (req, res) => {
     const id = req.params.id;
     const data = db.get(id);
@@ -1368,6 +1272,7 @@ app.all('/v1/:id', (req, res) => {
     if (isRobloxExecutor(req)) {
         if (!data) return res.status(404).send('print("VantaShield: Script Not Found")');
         res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+        res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
         return res.send(data.code);
     }
 
@@ -1477,7 +1382,6 @@ app.post('/ping/delete/:id', (req,res) => {
   if (entry && (entry.owner === user || user === 'master1')) { pingDb.delete(req.params.id); savePing(); }
   res.redirect('/ping');
 });
-
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
