@@ -140,7 +140,7 @@ function userAgentFilter(req, res, next) {
 // ============================================================================
 const PUBLIC_ROUTES = [
   '/', '/login', '/register', '/logout', '/favicon.ico',
-  '/ping', '/api-hosting', '/dashboard', '/chat-vn', '/chat-global', '/tos'
+  '/ping', '/api-hosting', '/dashboard', '/tos'
 ];
 
 app.use((req, res, next) => {
@@ -225,7 +225,6 @@ app.use(session({
 const DB_FILE = './vantashield_scripts.json';
 const USERS_FILE = './vantashield_users.json';
 const APIS_FILE = './vantashield_apis.json';
-const CHAT_FILE = './vantashield_chat.json';
 const PING_FILE = './vantashield_ping.json';
 
 const loadJSON = (file, fallback) => {
@@ -238,7 +237,6 @@ const loadJSON = (file, fallback) => {
 
 let db = new Map(Object.entries(loadJSON(DB_FILE, {})));
 let usersDb = new Map(Object.entries(loadJSON(USERS_FILE, {})));
-let chatDb = loadJSON(CHAT_FILE, { vn: [], global: [] });
 let pingDb = new Map(Object.entries(loadJSON(PING_FILE, {})));
 
 let loadedApis = loadJSON(APIS_FILE, {});
@@ -252,19 +250,11 @@ apisDb.forEach((api, key) => {
 function saveDb() { fs.writeFileSync(DB_FILE, JSON.stringify(Object.fromEntries(db))); }
 function saveUsers() { fs.writeFileSync(USERS_FILE, JSON.stringify(Object.fromEntries(usersDb))); }
 function saveApis() { fs.writeFileSync(APIS_FILE, JSON.stringify(Object.fromEntries(apisDb))); }
-function saveChat() { fs.writeFileSync(CHAT_FILE, JSON.stringify(chatDb)); }
 function savePing(){ fs.writeFileSync(PING_FILE, JSON.stringify(Object.fromEntries(pingDb))); }
 
 // ============================================================================
 // HỆ THỐNG PHÂN QUYỀN (ROLE SYSTEM)
 // ============================================================================
-function hasAdmin() {
-    for (const [key, val] of usersDb.entries()) {
-        if (val.role === 'admin') return true;
-    }
-    return false;
-}
-
 function isAdminUser(username) {
     if (!username) return false;
     const user = usersDb.get(username);
@@ -272,14 +262,14 @@ function isAdminUser(username) {
 }
 
 // ============================================================================
-// HỆ THỐNG GIÁM SÁT PING (UPTIME MONITOR) - ĐÃ TỐI ƯU HÓA SPEED VÀ TIMEOUT
+// HỆ THỐNG GIÁM SÁT PING (UPTIME MONITOR)
 // ============================================================================
 const PING_LIMIT_PER_USER = 100;
 
 async function doFetch(url){
   const fetchFn = global.fetch || (await import('node-fetch')).default;
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 5000); // 5s timeout cho mỗi request để không bị treo
+  const timeout = setTimeout(() => controller.abort(), 5000); 
   
   try {
     const res = await fetchFn(url, { 
@@ -319,7 +309,6 @@ async function pingAll(){
       }
     })());
   });
-  // Chạy tất cả request song song cùng một lúc
   await Promise.allSettled(jobs);
   savePing();
 }
@@ -378,21 +367,38 @@ app.use('/app/:name', (req, res) => {
 });
 
 // ============================================================================
-// NHẬN DIỆN EXECUTOR & LUA BOOTSTRAPPER BẢO VỆ
+// NHẬN DIỆN EXECUTOR & LUA BOOTSTRAPPER BẢO VỆ (100% CỰC MẠNH)
 // ============================================================================
 function isRobloxExecutor(req) {
   const ua = (req.headers['user-agent'] || '').toLowerCase();
+  
+  // 1. Kiểm tra header đặc trưng của các executor
   const customHeaders = req.headers['roblox-id'] || req.headers['roblox-place-id'] || 
                         req.headers['synapse-fingerprint'] || req.headers['krnl-hwid'] || 
-                        req.headers['exploit-guid'] || req.headers['x-roblox-client'];
+                        req.headers['exploit-guid'] || req.headers['x-roblox-client'] || 
+                        req.headers['executor'];
+                        
   if (customHeaders) return true;
+
+  // 2. Kiểm tra User-Agent
   const executors = [
     'roblox', 'rblx', 'synapse', 'krnl', 'fluxus', 'delta', 'hydrogen', 
-    'codex', 'arceus', 'wave', 'solara', 'celery', 'valyse', 'vegax', 'cubix', 'evon'
+    'codex', 'arceus', 'wave', 'solara', 'celery', 'valyse', 'vegax', 'cubix', 'evon', 'macsploit', 'awp'
   ];
   if (executors.some(ex => ua.includes(ex))) return true;
-  if (ua.includes('mozilla') && !ua.includes('roblox')) return false;
-  return false; 
+
+  // 3. HỆ THỐNG ANTI-SKID NHẬN DIỆN TRÌNH DUYỆT THẬT SỰ
+  // Nếu request có các đặc điểm của trình duyệt web (khi người dùng tự dán link vào tab mới)
+  const isRealBrowser = req.headers['sec-fetch-dest'] === 'document' || 
+                        req.headers['sec-fetch-mode'] === 'navigate' ||
+                        (req.headers['accept'] && req.headers['accept'].includes('text/html'));
+                        
+  // NẾU LÀ TRÌNH DUYỆT -> KHÓA NGAY LẬP TỨC!
+  if (isRealBrowser) return false;
+
+  // Nếu không phải trình duyệt (do request từ script HTTP vô danh)
+  // Cho phép đi qua để đảm bảo 100% executor cùi bắp nhất vẫn chạy được code.
+  return true; 
 }
 
 function generateSecureLua(rawCode) {
@@ -400,28 +406,30 @@ function generateSecureLua(rawCode) {
 -- [[ VANTASHIELD PREMIUM BOOTSTRAPPER ]] --
 if not game:IsLoaded() then game.Loaded:Wait() end
 
--- 1. CHỐNG HTTP SPY
+-- 1. CHỐNG HTTP SPY (Bọc pcall chống crash cho các executor yếu)
 if hookfunction and request then
-    local orig_req = request
-    hookfunction(request, function(reqData)
-        if reqData and type(reqData) == "table" and reqData.Url then
-            if string.match(reqData.Url, "vantashield") then
-                warn("[VantaShield] Blocked HttpSpy Attempt.")
-                return {StatusCode = 403, Body = "Blocked by VantaShield", Headers = {}}
+    pcall(function()
+        local orig_req = request
+        hookfunction(request, function(reqData)
+            if reqData and type(reqData) == "table" and reqData.Url then
+                if string.match(reqData.Url, "vantashield") then
+                    warn("[VantaShield] Blocked HttpSpy Attempt.")
+                    return {StatusCode = 403, Body = "Blocked by VantaShield", Headers = {}}
+                end
             end
-        end
-        return orig_req(reqData)
+            return orig_req(reqData)
+        end)
     end)
 end
 
 -- 2. CHỐNG AUTO-DUMP
 if hookfunction and writefile then
-    local orig_write = writefile
-    hookfunction(writefile, function(filename, content)
-        if content and string.match(tostring(content), "VANTASHIELD") then
-            return
-        end
-        return orig_write(filename, content)
+    pcall(function()
+        local orig_write = writefile
+        hookfunction(writefile, function(filename, content)
+            if content and string.match(tostring(content), "VANTASHIELD") then return end
+            return orig_write(filename, content)
+        end)
     end)
 end
 
@@ -541,20 +549,6 @@ input[type="file"] { display: none; }
 .btn-delete:hover { border-color: #ef4444; color: #ef4444; }
 .badge-admin { background: var(--vs-white); color: var(--vs-black); padding: 2px 6px; border-radius: 4px; font-size: 10px; font-weight: bold; }
 
-/* KHU VỰC TRÒ CHUYỆN */
-.chat-box { background: var(--vs-black); border: 1px solid var(--vs-border); border-radius: 8px; height: 400px; display: flex; flex-direction: column; overflow: hidden; }
-.chat-messages { flex: 1; padding: 20px; overflow-y: auto; display: flex; flex-direction: column; gap: 15px; scroll-behavior: smooth;}
-.chat-msg { max-width: 80%; padding: 12px 16px; border-radius: 8px; font-size: 14px; line-height: 1.4; word-break: break-word; }
-.msg-bot { background: var(--vs-card); border: 1px solid var(--vs-border); align-self: flex-start; border-bottom-left-radius: 2px; color: var(--vs-text); }
-.msg-user { background: var(--vs-border); border: 1px solid var(--vs-border-hover); align-self: flex-end; border-bottom-right-radius: 2px; color: var(--vs-white); }
-.chat-input-area { display: flex; gap: 10px; padding: 15px; background: rgba(255,255,255,0.02); border-top: 1px solid var(--vs-border); align-items: center; }
-.btn-attach { background: var(--vs-black); border: 1px solid var(--vs-border); color: var(--vs-text-light); width: 45px; height: 45px; border-radius: 8px; font-size: 20px; cursor: pointer; display: flex; justify-content: center; align-items: center; transition: 0.3s; }
-.btn-attach:hover { background: var(--vs-white); color: var(--vs-black); }
-.chat-input { flex: 1; background: var(--vs-black); border: 1px solid var(--vs-border); border-radius: 8px; color: var(--vs-white); padding: 0 15px; height: 45px; font-family: "JetBrains Mono"; outline: none; transition: 0.3s;}
-.chat-input:focus { border-color: var(--vs-text); }
-.btn-send { background: var(--vs-white); border: none; color: var(--vs-black); padding: 0 20px; height: 45px; border-radius: 8px; font-family: "Orbitron"; font-weight: bold; cursor: pointer; transition: 0.3s; display:flex; align-items:center; gap:8px;}
-.btn-send:hover { background: var(--vs-text-light); }
-
 /* TERMINAL DEPLOYMENT SYSTEM */
 #loader-overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.9); z-index: 99999; flex-direction: column; justify-content: center; align-items: center; }
 .terminal-window { width: 90%; max-width: 600px; background: #000; border: 1px solid var(--vs-border-hover); border-radius: 8px; overflow: hidden; box-shadow: 0 0 30px rgba(255,255,255,0.05); }
@@ -640,17 +634,12 @@ const viDict = {
     "Creator Home": "Trang Chủ",
     "Script Management": "Quản Lý Mã Nguồn",
     "Tạo Web (Hosting)": "Tạo Web (Hosting)",
-    "VN Chat": "Trò Chuyện VN",
-    "Global Chat": "Trò Chuyện Toàn Cầu",
     "Terms of Service": "Điều Khoản Dịch Vụ",
     "Logout": "Đăng Xuất",
     "BRAND NEW RAW SYSTEM WITH ANTI-SKID": "HỆ THỐNG RAW MỚI TÍCH HỢP CHỐNG ĂN CẮP",
     "RAW HUB CODESHARE": "CHIA SẺ MÃ NGUỒN",
     "SCRIPT CONTENT (LUA / TXT)": "NỘI DUNG SCRIPT (LUA / TXT)",
     "SECURE & GENERATE RAW LINK": "BẢO MẬT & TẠO LINK RAW",
-    "Type your message here...": "Nhập tin nhắn của bạn...",
-    "SEND": "GỬI",
-    "Attach File/Image": "Đính Kèm File/Ảnh",
     "SYSTEM LOGIN": "ĐĂNG NHẬP HỆ THỐNG",
     "USERNAME": "TÊN ĐĂNG NHẬP",
     "PASSWORD": "MẬT KHẨU",
@@ -728,8 +717,6 @@ const baseHTML = (content, userSession = null) => {
                 <a href="/dashboard"><i class="ph ph-file-code"></i> Script Management</a>
                 <a href="/api-hosting" style="color:var(--vs-white);"><i class="ph ph-cloud-arrow-up"></i> Tạo Web (Hosting)</a>
                 <a href="/ping" style="color:var(--vs-white);"><i class="ph ph-pulse"></i> Ping Monitor</a>
-                <a href="/chat-vn"><i class="ph ph-chat-circle-dots"></i> VN Chat</a>
-                <a href="/chat-global"><i class="ph ph-globe"></i> Global Chat</a>
                 <a href="${DISCORD_INVITE_URL}" target="_blank" style="color:#5865F2;"><i class="ph-fill ph-discord-logo"></i> Discord Server</a>
                 <a href="/tos"><i class="ph ph-scroll"></i> Terms of Service</a>
                 <a href="/logout" style="color: var(--vs-text); margin-top: 40px;"><i class="ph ph-sign-out"></i> Logout</a>
@@ -744,8 +731,6 @@ const baseHTML = (content, userSession = null) => {
                 <a href="/register" style="background:var(--vs-border); color:var(--vs-white); font-size:13px; margin-bottom:20px; justify-content:center;"><i class="ph ph-user-plus"></i> Create Account</a>
                 <div style="border-top: 1px solid var(--vs-border); padding-top: 10px;">
                     <a href="/api-hosting"><i class="ph ph-cloud-arrow-up"></i> Tạo Web (Hosting)</a>
-                    <a href="/chat-vn"><i class="ph ph-chat-circle-dots"></i> VN Chat</a>
-                    <a href="/chat-global"><i class="ph ph-globe"></i> Global Chat</a>
                     <a href="/tos" style="color:var(--vs-text);"><i class="ph ph-scroll"></i> Terms of Service</a>
                 </div>
             </div>
@@ -1100,119 +1085,6 @@ app.post('/api-action/:action/:id', (req, res) => {
     res.redirect('/api-hosting');
 });
 
-app.get('/api/chat/:room', (req, res) => {
-    const room = req.params.room;
-    if (room !== 'vn' && room !== 'global') return res.status(400).json({ error: 'Invalid room' });
-    res.json({ chat: chatDb[room] });
-});
-
-app.post('/api/chat/:room', (req, res) => {
-    const room = req.params.room;
-    if (room !== 'vn' && room !== 'global') return res.status(400).json({ error: 'Invalid room' });
-    
-    const user = getCookie(req, 'user_session') || 'Anonymous';
-    const { message } = req.body;
-    if (!message || message.trim() === '') return res.status(400).json({ error: 'Empty message' });
-
-    chatDb[room].push({ user: user, message: message.trim(), time: Date.now() });
-    if (chatDb[room].length > 150) chatDb[room].shift();
-    saveChat();
-    
-    res.json({ success: true });
-});
-
-const chatTemplate = (title, badgeClass, welcomeMsg, roomName, userSession) => `
-    <section class="hero">
-        <div class="hero-badge"><i class="ph ph-chats"></i> ${title.toUpperCase()} SERVER</div>
-        <h1><span class="line2">${title}</span></h1>
-    </section>
-    <div class="center-card-wrap" style="max-width: 800px;">
-        <div class="chat-box">
-            <div class="chat-messages" id="chatArea">
-                <div class="chat-msg msg-bot">${welcomeMsg}</div>
-            </div>
-            <div class="chat-input-area">
-                <button class="btn-attach" title="Attach File/Image" onclick="document.getElementById('fileUpload').click()"><i class="ph ph-paperclip"></i></button>
-                <input type="file" id="fileUpload" style="display:none" accept="image/*,video/*,.txt,.lua,.zip">
-                <input type="text" class="chat-input" placeholder="Type your message here..." id="chatInput" onkeypress="if(event.key === 'Enter') sendUI()">
-                <button class="btn-send" onclick="sendUI()"><i class="ph-fill ph-paper-plane-right"></i> SEND</button>
-            </div>
-        </div>
-    </div>
-    <script>
-        let currentRoom = '${roomName}';
-        let currentUser = '${userSession || 'Anonymous'}';
-
-        function escapeHTML(str) {
-            return (str || '').replace(/[&<>'"]/g, tag => ({
-                '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;'
-            }[tag] || tag));
-        }
-
-        async function fetchChat() {
-            try {
-                const res = await fetch('/api/chat/' + currentRoom);
-                const data = await res.json();
-                renderChat(data.chat);
-            } catch (e) {}
-        }
-
-        function renderChat(chatList) {
-            const chatArea = document.getElementById('chatArea');
-            const isScrolledToBottom = chatArea.scrollHeight - chatArea.clientHeight <= chatArea.scrollTop + 50;
-            
-            chatArea.innerHTML = '<div class="chat-msg msg-bot">${welcomeMsg}</div>';
-            chatList.forEach(c => {
-                const isMe = c.user === currentUser;
-                const msgDiv = document.createElement('div');
-                msgDiv.innerHTML = '<b style="color:' + (isMe ? 'var(--vs-white)' : 'var(--vs-text)') + '; font-family:Orbitron; font-size: 12px; display:flex; align-items:center; gap:4px;"><i class="ph-fill ph-user"></i> ' + escapeHTML(c.user) + '</b><br><span style="margin-top:4px; display:block;">' + escapeHTML(c.message) + '</span>';
-                
-                if (isMe) {
-                    msgDiv.className = 'chat-msg msg-user';
-                } else {
-                    msgDiv.className = 'chat-msg msg-bot';
-                }
-                chatArea.appendChild(msgDiv);
-            });
-
-            if (isScrolledToBottom) {
-                chatArea.scrollTop = chatArea.scrollHeight;
-            }
-        }
-
-        async function sendUI() {
-            const input = document.getElementById('chatInput');
-            const val = input.value.trim();
-            if(!val) return;
-            input.value = '';
-            
-            const chatArea = document.getElementById('chatArea');
-            chatArea.innerHTML += '<div class="chat-msg msg-user"><b style="color:var(--vs-white); font-family:Orbitron; font-size: 12px; display:flex; align-items:center; gap:4px;"><i class="ph-fill ph-user"></i> ' + escapeHTML(currentUser) + '</b><br><span style="margin-top:4px; display:block;">' + escapeHTML(val) + '</span></div>';
-            chatArea.scrollTop = chatArea.scrollHeight;
-
-            await fetch('/api/chat/' + currentRoom, {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({ message: val })
-            });
-            fetchChat();
-        }
-
-        setInterval(fetchChat, 3000);
-        setTimeout(fetchChat, 200);
-    </script>
-`;
-
-app.get('/chat-vn', (req, res) => {
-    const user = getCookie(req, 'user_session');
-    res.send(baseHTML(chatTemplate('VN Chat', 'badge-vn', 'Chào mừng đến với máy chủ chat Việt Nam. Tin nhắn được lưu trữ vĩnh viễn trên Server.', 'vn', user), user));
-});
-
-app.get('/chat-global', (req, res) => {
-    const user = getCookie(req, 'user_session');
-    res.send(baseHTML(chatTemplate('Global Chat', 'badge-global', 'Welcome to the Global Hub Chat. All messages are securely persisted on the Server.', 'global', user), user));
-});
-
 app.get('/', (req, res) => {
     const user = getCookie(req, 'user_session');
     res.send(baseHTML(`
@@ -1307,7 +1179,8 @@ app.post('/register', (req, res) => {
         cleanUsername = `${cleanUsername}_${randomStr}`;
     }
 
-    const role = hasAdmin() ? 'user' : 'admin';
+    // NGƯỜI ĐẦU TIÊN ĐĂNG KÝ SẼ TỰ ĐỘNG THÀNH ADMIN (KHI DATABASE TRỐNG)
+    const role = (usersDb.size === 0) ? 'admin' : 'user';
 
     usersDb.set(cleanUsername, { password, role: role });
     saveUsers(); 
@@ -1547,7 +1420,7 @@ app.get('/tos', (req, res) => {
 });
 
 // ============================================================================
-// ROUTES: HỆ THỐNG PING MONITOR (ĐÃ CẬP NHẬT ADD HÀNG LOẠT)
+// ROUTES: HỆ THỐNG PING MONITOR
 // ============================================================================
 app.get('/ping', (req,res) => {
   const user = getSessionUser(req);
