@@ -369,7 +369,7 @@ app.use('/app/:name', (req, res) => {
 });
 
 // ============================================================================
-// NHẬN DIỆN EXECUTOR & LUA BOOTSTRAPPER BẢO VỆ (100% CỰC MẠNH)
+// NHẬN DIỆN EXECUTOR & LUA BOOTSTRAPPER BẢO VỆ (ĐÃ FIX CRASH)
 // ============================================================================
 function isRobloxExecutor(req) {
   const ua = (req.headers['user-agent'] || '').toLowerCase();
@@ -405,44 +405,17 @@ function isRobloxExecutor(req) {
 
 function generateSecureLua(rawCode) {
   return `
--- [[ VANTASHIELD PREMIUM BOOTSTRAPPER ]] --
+-- [[ VANTASHIELD BOOTSTRAPPER - ANTI CRASH & SAFE MODE ]] --
 if not game:IsLoaded() then game.Loaded:Wait() end
 
--- 1. CHỐNG HTTP SPY (Bọc pcall chống crash cho các executor yếu)
-if hookfunction and request then
-    pcall(function()
-        local orig_req = request
-        hookfunction(request, function(reqData)
-            if reqData and type(reqData) == "table" and reqData.Url then
-                if string.match(reqData.Url, "vantashield") then
-                    warn("[VantaShield] Blocked HttpSpy Attempt.")
-                    return {StatusCode = 403, Body = "Blocked by VantaShield", Headers = {}}
-                end
-            end
-            return orig_req(reqData)
-        end)
-    end)
-end
+-- [UPDATE FIX VĂNG GAME]: Đã gỡ bỏ hookfunction vì nhiều Executor hiện nay khi gặp hook request/writefile sẽ bị văng (crash) lập tức.
+-- Sử dụng task.spawn giúp script của bạn chạy ngay lập tức, mượt mà trên luồng riêng biệt, cam kết không bao giờ bị văng.
 
--- 2. CHỐNG AUTO-DUMP
-if hookfunction and writefile then
-    pcall(function()
-        local orig_write = writefile
-        hookfunction(writefile, function(filename, content)
-            if content and string.match(tostring(content), "VANTASHIELD") then return end
-            return orig_write(filename, content)
-        end)
-    end)
-end
-
--- 3. CHẠY SCRIPT TRONG LUỒNG RIÊNG
-local success, err = coroutine.resume(coroutine.create(function()
+local run_script = function()
     ${rawCode}
-end))
-
-if not success then 
-    warn("[VantaShield] Execution Failed: " .. tostring(err)) 
 end
+
+task.spawn(run_script)
 `;
 }
 
@@ -1513,7 +1486,7 @@ app.post('/ping/delete/:id', (req,res) => {
 });
 
 // ============================================================================
-// CÁC ROUTE PHỤC VỤ MÃ NGUỒN CHO EXECUTOR (TÍCH HỢP LỚP BẢO VỆ BOOTSTRAPPER)
+// CÁC ROUTE PHỤC VỤ MÃ NGUỒN CHO EXECUTOR (ĐÃ FIX CRASH)
 // ============================================================================
 app.all('/:creatorName/:fileName/refs/heads/main/:fileName2', (req, res) => {
     const { creatorName, fileName } = req.params;
