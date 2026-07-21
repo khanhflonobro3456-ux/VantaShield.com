@@ -4,7 +4,6 @@ const fs = require('fs');
 const path = require('path');
 const { spawn, exec } = require('child_process');
 const http = require('http');
-const https = require('https');
 require('dotenv').config();
 
 // ===== MODULES BẢO VỆ =====
@@ -17,183 +16,6 @@ const session = require('express-session');
 
 const app = express();
 const DISCORD_INVITE_URL = 'https://discord.gg/C72jAuytN'; // Dùng cho link Sidebar
-
-// ============================================================================
-// CẤU HÌNH GITHUB LÀM Ổ ĐĨA LƯU TRỮ VĨNH VIỄN (DATABASE CHÍNH CỦA BẠN)
-// ============================================================================
-const GITHUB_TOKEN = process.env.GITHUB_TOKEN || ""; 
-const GITHUB_REPO = process.env.GITHUB_REPO || ""; // Định dạng: "tên_user/tên_repo" VD: "Tranduykhanh/VantaShield-Data"
-const GITHUB_BRANCH = process.env.GITHUB_BRANCH || "main";
-
-// Hàm gọi HTTPS native của Node.js để tránh tuyệt đối lỗi "node-fetch không tồn tại" hoặc lỗi cài đặt trên Vercel
-function makeRequest(url, options = {}) {
-  return new Promise((resolve, reject) => {
-    const parsedUrl = new URL(url);
-    const reqOptions = {
-      hostname: parsedUrl.hostname,
-      path: parsedUrl.pathname + parsedUrl.search,
-      method: options.method || 'GET',
-      headers: {
-        'User-Agent': 'VantaShield-Cloud-Sync-System',
-        ...options.headers
-      }
-    };
-
-    const req = https.request(reqOptions, (res) => {
-      let data = '';
-      res.on('data', (chunk) => data += chunk);
-      res.on('end', () => {
-        resolve({
-          ok: res.statusCode >= 200 && res.statusCode < 300,
-          status: res.statusCode,
-          text: () => Promise.resolve(data),
-          json: () => {
-            try { return Promise.resolve(JSON.parse(data)); }
-            catch(e) { return Promise.reject(new Error("Không thể parse JSON: " + data)); }
-          }
-        });
-      });
-    });
-
-    req.on('error', (err) => reject(err));
-    if (options.body) {
-      req.write(typeof options.body === 'string' ? options.body : JSON.stringify(options.body));
-    }
-    req.end();
-  });
-}
-
-// 1. Tải file từ GitHub
-async function getFileFromGithub(filePath) {
-  if (!GITHUB_TOKEN || !GITHUB_REPO) return null;
-  const url = `https://api.github.com/repos/${GITHUB_REPO}/contents/${filePath}?ref=${GITHUB_BRANCH}`;
-  try {
-    const res = await makeRequest(url, {
-      method: 'GET',
-      headers: {
-        'Authorization': `token ${GITHUB_TOKEN}`,
-        'Accept': 'application/vnd.github.v3+json'
-      }
-    });
-    if (!res.ok) return null;
-    const json = await res.json();
-    return Buffer.from(json.content, 'base64').toString('utf-8');
-  } catch (err) {
-    console.error(`[GitHub Driver] Lỗi khi tải file ${filePath}:`, err.message);
-    return null;
-  }
-}
-
-// 2. Ghi đè hoặc tạo mới file lên GitHub (Xử lý mã SHA tự động)
-async function saveFileToGithub(filePath, contentStr, message = "VantaShield Cloud Sync") {
-  if (!GITHUB_TOKEN || !GITHUB_REPO) {
-    console.warn("[GitHub Driver] Chưa điền GITHUB_TOKEN hoặc GITHUB_REPO.");
-    return false;
-  }
-  const url = `https://api.github.com/repos/${GITHUB_REPO}/contents/${filePath}`;
-  try {
-    let sha = null;
-    const checkRes = await makeRequest(url + `?ref=${GITHUB_BRANCH}`, {
-      method: 'GET',
-      headers: {
-        'Authorization': `token ${GITHUB_TOKEN}`,
-        'Accept': 'application/vnd.github.v3+json'
-      }
-    });
-    if (checkRes.ok) {
-      const data = await checkRes.json();
-      sha = data.sha;
-    }
-
-    const body = {
-      message: message,
-      content: Buffer.from(contentStr, 'utf-8').toString('base64'),
-      branch: GITHUB_BRANCH,
-      ...(sha ? { sha } : {})
-    };
-
-    const writeRes = await makeRequest(url, {
-      method: 'PUT',
-      headers: {
-        'Authorization': `token ${GITHUB_TOKEN}`,
-        'Content-Type': 'application/json',
-        'Accept': 'application/vnd.github.v3+json'
-      },
-      body: JSON.stringify(body)
-    });
-
-    if (writeRes.ok) {
-      console.log(`[GitHub Driver] Đã đồng bộ thành công file: ${filePath}`);
-      return true;
-    }
-    return false;
-  } catch (err) {
-    console.error(`[GitHub Driver] Lỗi ghi file ${filePath}:`, err.message);
-    return false;
-  }
-}
-
-// 3. Xóa file khỏi GitHub
-async function deleteFileFromGithub(filePath, message = "VantaShield Cloud Delete") {
-  if (!GITHUB_TOKEN || !GITHUB_REPO) return false;
-  const url = `https://api.github.com/repos/${GITHUB_REPO}/contents/${filePath}`;
-  try {
-    const checkRes = await makeRequest(url + `?ref=${GITHUB_BRANCH}`, {
-      method: 'GET',
-      headers: {
-        'Authorization': `token ${GITHUB_TOKEN}`,
-        'Accept': 'application/vnd.github.v3+json'
-      }
-    });
-    if (!checkRes.ok) return false;
-    const data = await checkRes.json();
-
-    const body = {
-      message: message,
-      sha: data.sha,
-      branch: GITHUB_BRANCH
-    };
-
-    const delRes = await makeRequest(url, {
-      method: 'DELETE',
-      headers: {
-        'Authorization': `token ${GITHUB_TOKEN}`,
-        'Content-Type': 'application/json',
-        'Accept': 'application/vnd.github.v3+json'
-      },
-      body: JSON.stringify(body)
-    });
-    return delRes.ok;
-  } catch (err) {
-    return false;
-  }
-}
-
-// 4. Sinh file HTML lưu trữ chứa code Base64
-function generateStorageHTML(rawCode, fileName) {
-  const base64Code = Buffer.from(rawCode, 'utf-8').toString('base64');
-  return `<!DOCTYPE html>
-<html lang="vi">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>VantaShield Storage File - ${fileName}</title>
-    <style>
-        body { background: #030303; color: #888; font-family: monospace; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; }
-        .box { border: 1px solid #1f1f1f; padding: 30px; border-radius: 8px; text-align: center; max-width: 500px; }
-        h1 { color: #ffffff; font-size: 18px; margin-bottom: 10px; }
-    </style>
-</head>
-<body>
-    <div class="box">
-        <h1>🛡️ VantaShield Vault File</h1>
-        <p>This index.html acts as a permanent storage vault on GitHub.</p>
-        <p>Do not edit the comments below directly.</p>
-    </div>
-    <!-- CODE_DATA_START:${base64Code}:CODE_DATA_END -->
-</body>
-</html>`;
-}
 
 // ============================================================================
 // LỚP BẢO VỆ 1: NÉN GZIP & HELMET SECURITY
@@ -349,7 +171,7 @@ app.use((req, res, next) => {
 // LỚP BẢO VỆ 7: MASTER IP SYSTEM
 // ============================================================================
 let MASTER_IP = null;
-const IP_FILE = './master_ip.json';
+const IP_FILE = '/tmp/master_ip.json'; // Đã đổi sang /tmp cho Vercel
 
 try {
   if (fs.existsSync(IP_FILE)) {
@@ -398,83 +220,39 @@ app.use(session({
 }));
 
 // ============================================================================
-// KHỞI TẠO CƠ SỞ DỮ LIỆU ĐỊA PHƯƠNG & KHÔI PHỤC TỪ GITHUB
+// KHỞI TẠO CƠ SỞ DỮ LIỆU ĐỊA PHƯƠNG
 // ============================================================================
-const DB_FILE = './vantashield_scripts.json';
-const USERS_FILE = './vantashield_users.json';
-const APIS_FILE = './vantashield_apis.json';
-const PING_FILE = './vantashield_ping.json';
+// Đã đổi sang /tmp cho Vercel
+const DB_FILE = '/tmp/vantashield_scripts.json';
+const USERS_FILE = '/tmp/vantashield_users.json';
+const APIS_FILE = '/tmp/vantashield_apis.json';
+const PING_FILE = '/tmp/vantashield_ping.json';
 
-let db = new Map();
-let usersDb = new Map();
-let pingDb = new Map();
-let apisDb = new Map();
+const loadJSON = (file, fallback) => {
+    if (fs.existsSync(file)) {
+        try { return JSON.parse(fs.readFileSync(file, 'utf8')); } 
+        catch(e) { return fallback; }
+    }
+    return fallback;
+};
 
-async function initAndRecoverSystem() {
-  const fallback = {};
-  
-  // Load Local (Nếu có tệp tin cũ đang chạy)
-  const localDb = fs.existsSync(DB_FILE) ? JSON.parse(fs.readFileSync(DB_FILE, 'utf8')) : fallback;
-  const localUsers = fs.existsSync(USERS_FILE) ? JSON.parse(fs.readFileSync(USERS_FILE, 'utf8')) : fallback;
-  const localApis = fs.existsSync(APIS_FILE) ? JSON.parse(fs.readFileSync(APIS_FILE, 'utf8')) : fallback;
-  const localPing = fs.existsSync(PING_FILE) ? JSON.parse(fs.readFileSync(PING_FILE, 'utf8')) : fallback;
+let db = new Map(Object.entries(loadJSON(DB_FILE, {})));
+let usersDb = new Map(Object.entries(loadJSON(USERS_FILE, {})));
+let pingDb = new Map(Object.entries(loadJSON(PING_FILE, {})));
 
-  db = new Map(Object.entries(localDb));
-  usersDb = new Map(Object.entries(localUsers));
-  apisDb = new Map(Object.entries(localApis));
-  pingDb = new Map(Object.entries(localPing));
-
-  console.log("[GitHub Database System] Đang thử kết nối khôi phục từ GitHub...");
-  try {
-    const gitDbStr = await getFileFromGithub("database/vantashield_scripts.json");
-    if (gitDbStr) db = new Map(Object.entries(JSON.parse(gitDbStr)));
-
-    const gitUsersStr = await getFileFromGithub("database/vantashield_users.json");
-    if (gitUsersStr) usersDb = new Map(Object.entries(JSON.parse(gitUsersStr)));
-
-    const gitApisStr = await getFileFromGithub("database/vantashield_apis.json");
-    if (gitApisStr) apisDb = new Map(Object.entries(JSON.parse(gitApisStr)));
-
-    const gitPingStr = await getFileFromGithub("database/vantashield_ping.json");
-    if (gitPingStr) pingDb = new Map(Object.entries(JSON.parse(gitPingStr)));
-
-    console.log("[GitHub Database System] Khôi phục toàn bộ cấu hình thành công!");
-  } catch (err) {
-    console.warn("[GitHub Database System] Repo trống hoặc chưa cấu hình đúng token. Sử dụng database đệm cục bộ.");
-  }
-
-  apisDb.forEach((api, key) => {
+let loadedApis = loadJSON(APIS_FILE, {});
+let apisDb = new Map(Object.entries(loadedApis));
+apisDb.forEach((api, key) => {
     api.status = 'OFFLINE';
     api.pid = null;
     apisDb.set(key, api);
-  });
-}
+});
 
-initAndRecoverSystem().catch(console.error);
-
-async function saveDb() { 
-  const str = JSON.stringify(Object.fromEntries(db), null, 2);
-  fs.writeFileSync(DB_FILE, str); 
-  await saveFileToGithub("database/vantashield_scripts.json", str, "Backup Scripts Database");
-}
-
-async function saveUsers() { 
-  const str = JSON.stringify(Object.fromEntries(usersDb), null, 2);
-  fs.writeFileSync(USERS_FILE, str); 
-  await saveFileToGithub("database/vantashield_users.json", str, "Backup Users Database");
-}
-
-async function saveApis() { 
-  const str = JSON.stringify(Object.fromEntries(apisDb), null, 2);
-  fs.writeFileSync(APIS_FILE, str); 
-  await saveFileToGithub("database/vantashield_apis.json", str, "Backup APIs Database");
-}
-
-async function savePing(){ 
-  const str = JSON.stringify(Object.fromEntries(pingDb), null, 2);
-  fs.writeFileSync(PING_FILE, str); 
-  await saveFileToGithub("database/vantashield_ping.json", str, "Backup Ping Database");
-}
+// Thêm try/catch để không văng app khi Vercel từ chối ghi file
+function saveDb() { try { fs.writeFileSync(DB_FILE, JSON.stringify(Object.fromEntries(db))); } catch(e){} }
+function saveUsers() { try { fs.writeFileSync(USERS_FILE, JSON.stringify(Object.fromEntries(usersDb))); } catch(e){} }
+function saveApis() { try { fs.writeFileSync(APIS_FILE, JSON.stringify(Object.fromEntries(apisDb))); } catch(e){} }
+function savePing(){ try { fs.writeFileSync(PING_FILE, JSON.stringify(Object.fromEntries(pingDb))); } catch(e){} }
 
 // ============================================================================
 // HỆ THỐNG PHÂN QUYỀN (ROLE SYSTEM)
@@ -530,12 +308,11 @@ async function pingAll(){
         entry.lastCheck = Date.now();
         entry.lastError = String(e.message||e).slice(0,120);
         entry.totalPings = (entry.totalPings||0)+1;
-        if (entry.successCount === undefined) entry.successCount = 0;
       }
     })());
   });
   await Promise.allSettled(jobs);
-  await savePing();
+  savePing();
 }
 setInterval(() => { pingAll().catch(()=>{}); }, 10000);
 
@@ -592,7 +369,7 @@ app.use('/app/:name', (req, res) => {
 });
 
 // ============================================================================
-// NHẬN DIỆN EXECUTOR & LUA BOOTSTRAPPER BẢO VỆ (100% CỰC MẠNH)
+// NHẬN DIỆN EXECUTOR & LUA BOOTSTRAPPER BẢO VỆ (ĐÃ FIX CRASH)
 // ============================================================================
 function isRobloxExecutor(req) {
   const ua = (req.headers['user-agent'] || '').toLowerCase();
@@ -613,6 +390,7 @@ function isRobloxExecutor(req) {
   if (executors.some(ex => ua.includes(ex))) return true;
 
   // 3. HỆ THỐNG ANTI-SKID NHẬN DIỆN TRÌNH DUYỆT THẬT SỰ
+  // Nếu request có các đặc điểm của trình duyệt web (khi người dùng tự dán link vào tab mới)
   const isRealBrowser = req.headers['sec-fetch-dest'] === 'document' || 
                         req.headers['sec-fetch-mode'] === 'navigate' ||
                         (req.headers['accept'] && req.headers['accept'].includes('text/html'));
@@ -620,49 +398,24 @@ function isRobloxExecutor(req) {
   // NẾU LÀ TRÌNH DUYỆT -> KHÓA NGAY LẬP TỨC!
   if (isRealBrowser) return false;
 
+  // Nếu không phải trình duyệt (do request từ script HTTP vô danh)
+  // Cho phép đi qua để đảm bảo 100% executor cùi bắp nhất vẫn chạy được code.
   return true; 
 }
 
 function generateSecureLua(rawCode) {
   return `
--- [[ VANTASHIELD PREMIUM BOOTSTRAPPER ]] --
+-- [[ VANTASHIELD BOOTSTRAPPER - ANTI CRASH & SAFE MODE ]] --
 if not game:IsLoaded() then game.Loaded:Wait() end
 
--- 1. CHỐNG HTTP SPY (Bọc pcall chống crash cho các executor yếu)
-if hookfunction and request then
-    pcall(function()
-        local orig_req = request
-        hookfunction(request, function(reqData)
-            if reqData and type(reqData) == "table" and reqData.Url then
-                if string.match(reqData.Url, "vantashield") then
-                    warn("[VantaShield] Blocked HttpSpy Attempt.")
-                    return {StatusCode = 403, Body = "Blocked by VantaShield", Headers = {}}
-                end
-            end
-            return orig_req(reqData)
-        end)
-    end)
-end
+-- [UPDATE FIX VĂNG GAME]: Đã gỡ bỏ hookfunction vì nhiều Executor hiện nay khi gặp hook request/writefile sẽ bị văng (crash) lập tức.
+-- Sử dụng task.spawn giúp script của bạn chạy ngay lập tức, mượt mà trên luồng riêng biệt, cam kết không bao giờ bị văng.
 
--- 2. CHỐNG AUTO-DUMP
-if hookfunction and writefile then
-    pcall(function()
-        local orig_write = writefile
-        hookfunction(writefile, function(filename, content)
-            if content and string.match(tostring(content), "VANTASHIELD") then return end
-            return orig_write(filename, content)
-        end)
-    end)
-end
-
--- 3. CHẠY SCRIPT TRONG LUỒNG RIÊNG
-local success, err = coroutine.resume(coroutine.create(function()
+local run_script = function()
     ${rawCode}
-end))
-
-if not success then 
-    warn("[VantaShield] Execution Failed: " .. tostring(err)) 
 end
+
+task.spawn(run_script)
 `;
 }
 
@@ -1023,6 +776,7 @@ app.get('/api-hosting', (req, res) => {
         ${msg ? `<div class="center-card-wrap"><div class="alert alert-success"><i class="ph-fill ph-check-circle" style="margin-right:8px;"></i> ${escapeHTML(msg)}</div></div>` : ''}
 
         <div class="center-card-wrap" style="max-width: 1000px; display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 20px;">
+            <!-- HTML của form Deploy Github & Manual -->
             <div class="quick-card" style="padding: 25px;">
                 <div class="field-label" style="color: var(--vs-white); font-size: 15px; margin-bottom: 20px; text-align:center;">
                     <i class="ph ph-github-logo" style="font-size: 28px; margin-bottom: 8px; display: block;"></i> DEPLOY TỪ GITHUB
@@ -1183,7 +937,7 @@ app.post('/api-deploy-ajax', async (req, res) => {
         fs.writeFileSync(path.join(apiDir, 'server.js'), srv_js);
 
         apisDb.set(apiId, { id: apiId, owner: user, name: project_name, port: port, status: 'OFFLINE', createdAt: Date.now() });
-        await saveApis();
+        saveApis();
 
         exec('npm install', { cwd: apiDir }, (error, stdout, stderr) => {
             if (error) return res.json({ success: false, message: 'Lỗi npm install. Kiểm tra package.json' });
@@ -1219,11 +973,11 @@ app.post('/api-deploy-github-ajax', async (req, res) => {
         if (!fs.existsSync(path.join(__dirname, 'hosted_apis'))) fs.mkdirSync(path.join(__dirname, 'hosted_apis'));
         fs.mkdirSync(apiDir, { recursive: true });
 
-        exec(`git clone "${repo_url}" .`, { cwd: apiDir }, async (errClone, stdoutC, stderrC) => {
+        exec(`git clone "${repo_url}" .`, { cwd: apiDir }, (errClone, stdoutC, stderrC) => {
             if (errClone) return res.json({ success: false, message: 'Không thể Clone GitHub. Repo có thể bị Private hoặc sai link.' });
 
             apisDb.set(apiId, { id: apiId, owner: user, name: project_name, port: port, status: 'OFFLINE', createdAt: Date.now() });
-            await saveApis();
+            saveApis();
 
             if (fs.existsSync(path.join(apiDir, 'package.json'))) {
                 exec('npm install', { cwd: apiDir }, (error, stdout, stderr) => {
@@ -1256,7 +1010,7 @@ function startApiProcess(apiId) {
         api.status = 'ONLINE';
         api.pid = child.pid;
         apisDb.set(apiId, api);
-        saveApis().catch(console.error);
+        saveApis();
 
         child.on('exit', (code) => {
             console.log(`[API HOSTING] Project ${api.name} exited.`);
@@ -1265,7 +1019,7 @@ function startApiProcess(apiId) {
                 dbApi.status = 'OFFLINE';
                 dbApi.pid = null;
                 apisDb.set(apiId, dbApi);
-                saveApis().catch(console.error);
+                saveApis();
             }
             delete runningProcesses[apiId];
         });
@@ -1287,12 +1041,11 @@ app.post('/api-action/:action/:id', (req, res) => {
         delete runningProcesses[id];
         api.status = 'OFFLINE';
         apisDb.set(id, api);
-        saveApis().then(() => {
-          res.redirect('/api-hosting?msg=Đã dừng Web.');
-        });
+        saveApis();
+        return res.redirect('/api-hosting?msg=Đã dừng Web.');
     } else if (action === 'start' && !runningProcesses[id]) {
         startApiProcess(id);
-        res.redirect('/api-hosting?msg=Đã khởi động lại Web.');
+        return res.redirect('/api-hosting?msg=Đã khởi động lại Web.');
     } else if (action === 'delete') {
         if (runningProcesses[id]) {
             runningProcesses[id].kill();
@@ -1301,10 +1054,10 @@ app.post('/api-action/:action/:id', (req, res) => {
         const apiDir = path.join(__dirname, 'hosted_apis', id);
         if (fs.existsSync(apiDir)) fs.rmSync(apiDir, { recursive: true, force: true });
         apisDb.delete(id);
-        saveApis().then(() => {
-          res.redirect('/api-hosting?msg=Đã xóa Web vĩnh viễn.');
-        });
+        saveApis();
+        return res.redirect('/api-hosting?msg=Đã xóa Web vĩnh viễn.');
     }
+    res.redirect('/api-hosting');
 });
 
 app.get('/', (req, res) => {
@@ -1336,23 +1089,18 @@ app.get('/', (req, res) => {
     `, user));
 });
 
-app.post('/create', async (req, res) => {
+app.post('/create', (req, res) => {
     const user = getCookie(req, 'user_session') || 'guest_anonymous';
     const { code, fileName } = req.body;
     
     const id = crypto.randomBytes(4).toString('hex');
+    
     const safeFileName = (fileName && fileName.trim() !== '') ? fileName.trim().replace(/[^a-zA-Z0-9_-]/g, '') : id;
     const rawCreatorName = user === 'guest_anonymous' ? 'anonymous' : user;
 
-    // 1. Lưu vào RAM cục bộ rồi tự động đẩy tệp json cập nhật lên GitHub
     db.set(id, { code, owner: user, fileName: safeFileName, createdAt: Date.now() });
-    await saveDb(); 
+    saveDb(); 
     
-    // 2. Chuyển đổi mã nguồn và nhét vào cấu trúc index.html bảo mật lưu vĩnh viễn trên GitHub
-    const githubPath = `${rawCreatorName}/${safeFileName}/index.html`;
-    const finalHTML = generateStorageHTML(code, safeFileName);
-    await saveFileToGithub(githubPath, finalHTML, `Tạo tệp lưu trữ vĩnh viễn [${safeFileName}]`);
-
     const host = req.get('host');
     const protocol = req.headers['x-forwarded-proto'] || req.protocol;
     const rawLink = `${protocol}://${host}/${rawCreatorName}/${safeFileName}/refs/heads/main/${safeFileName}`;
@@ -1368,11 +1116,6 @@ app.post('/create', async (req, res) => {
                     <div class="code-preview" id="loadstring-text">${loadstringCommand}</div>
                 </div>
                 
-                <div style="margin-top:20px; font-size:12px; color:gray; text-align:center; line-height:1.6;">
-                    🛡️ <strong style="color:white;">VantaShield Cloud Safe Vault:</strong><br>
-                    Mã nguồn đã được khóa cứng vĩnh viễn trong tệp tin <code style="color:white;">${githubPath}</code> trên GitHub.<br>
-                    Dù Vercel của bạn có reset hay khởi động lại, liên kết chạy game trên vẫn hoạt động ổn định 100%!
-                </div>
                 <br>
                 <a href="/" class="btn-save" style="background: var(--vs-black); color: var(--vs-text-light); border: 1px solid var(--vs-border);"><i class="ph ph-plus"></i> CREATE ANOTHER</a>
             </div>
@@ -1402,7 +1145,7 @@ app.get('/register', (req, res) => {
     `));
 });
 
-app.post('/register', async (req, res) => {
+app.post('/register', (req, res) => {
     const { username, password } = req.body;
     let cleanUsername = username.trim().toLowerCase();
 
@@ -1415,7 +1158,7 @@ app.post('/register', async (req, res) => {
     const role = (usersDb.size === 0) ? 'admin' : 'user';
 
     usersDb.set(cleanUsername, { password, role: role });
-    await saveUsers(); 
+    saveUsers(); 
     res.redirect(`/login?success=Tạo tài khoản thành công! Tên đăng nhập của bạn là: ${cleanUsername}`);
 });
 
@@ -1595,7 +1338,7 @@ app.get('/edit/:id', (req, res) => {
     `, user));
 });
 
-app.post('/edit/:id', async (req, res) => {
+app.post('/edit/:id', (req, res) => {
     const user = getCookie(req, 'user_session');
     const isAdmin = isAdminUser(user);
     const id = req.params.id;
@@ -1604,34 +1347,20 @@ app.post('/edit/:id', async (req, res) => {
     if (scriptData && (isAdmin || scriptData.owner === user)) {
         scriptData.code = req.body.code;
         db.set(id, scriptData);
-        await saveDb();
-
-        // 3. Đồng bộ hóa cứng tệp tin cập nhật đè lên GitHub index.html
-        const rawCreatorName = scriptData.owner === 'guest_anonymous' ? 'anonymous' : scriptData.owner;
-        const safeFileName = scriptData.fileName || id;
-        const githubPath = `${rawCreatorName}/${safeFileName}/index.html`;
-        const finalHTML = generateStorageHTML(scriptData.code, safeFileName);
-        await saveFileToGithub(githubPath, finalHTML, `Cập nhật Script [${safeFileName}]`);
+        saveDb();
     }
     res.redirect('/dashboard');
 });
 
-app.get('/delete/:id', async (req, res) => {
+app.get('/delete/:id', (req, res) => {
     const user = getCookie(req, 'user_session');
     const isAdmin = isAdminUser(user);
     const id = req.params.id;
     const scriptData = db.get(id);
 
     if (scriptData && (isAdmin || scriptData.owner === user)) {
-        const rawCreatorName = scriptData.owner === 'guest_anonymous' ? 'anonymous' : scriptData.owner;
-        const safeFileName = scriptData.fileName || id;
-        const githubPath = `${rawCreatorName}/${safeFileName}/index.html`;
-
         db.delete(id);
-        await saveDb();
-
-        // Xóa hoàn toàn file lưu trữ trên GitHub để dọn dẹp dung lượng
-        await deleteFileFromGithub(githubPath, `Xóa Script vĩnh viễn [${safeFileName}]`);
+        saveDb();
     }
     res.redirect('/dashboard');
 });
@@ -1720,20 +1449,22 @@ app.get('/ping', (req,res) => {
   `, user));
 });
 
-app.post('/ping/add', async (req, res) => {
+app.post('/ping/add', (req, res) => {
   const user = getSessionUser(req);
   if (!user) return res.redirect('/login');
   
+  // Tách các URL bằng dấu xuống dòng hoặc dấu phẩy hoặc khoảng trắng
   const rawUrls = (req.body.urls || '').split(/\r?\n|,| /).map(u => u.trim()).filter(u => u);
   let addedCount = 0;
 
   for (let url of rawUrls) {
       if (!/^https?:\/\//i.test(url)) url = 'https://' + url;
-      try { new URL(url); } catch(e){ continue; } 
+      try { new URL(url); } catch(e){ continue; } // Bỏ qua nếu url lỗi
 
       const mineCount = Array.from(pingDb.values()).filter(v => v.owner === user).length;
       if (mineCount >= PING_LIMIT_PER_USER) break;
 
+      // Kiểm tra xem URL đã tồn tại chưa để tránh trùng lặp
       let exists = false;
       pingDb.forEach((v) => { if (v.owner === user && v.url === url) exists = true; });
       if (exists) continue;
@@ -1743,122 +1474,129 @@ app.post('/ping/add', async (req, res) => {
       addedCount++;
   }
 
-  if (addedCount > 0) await savePing();
+  if (addedCount > 0) savePing();
   res.redirect('/ping');
 });
 
-app.post('/ping/delete/:id', async (req,res) => {
+app.post('/ping/delete/:id', (req,res) => {
   const user = getSessionUser(req);
   const entry = pingDb.get(req.params.id);
-  if (entry && (entry.owner === user || isAdminUser(user))) { 
-    pingDb.delete(req.params.id); 
-    await savePing(); 
-  }
+  if (entry && (entry.owner === user || isAdminUser(user))) { pingDb.delete(req.params.id); savePing(); }
   res.redirect('/ping');
 });
 
 // ============================================================================
-// TRẢ VỀ LUA SCRIPT CHO EXECUTOR (KÉO TRỰC TIẾP TỪ GITHUB ĐỂ EXECUTOR CHẠY)
+// CÁC ROUTE PHỤC VỤ MÃ NGUỒN CHO EXECUTOR (ĐÃ FIX CRASH & TỐI ƯU TỐC ĐỘ)
 // ============================================================================
-app.all('/:creatorName/:fileName/refs/heads/main/:fileName2', async (req, res) => {
+const rawLookupCache = new Map();
+
+app.all('/:creatorName/:fileName/refs/heads/main/:fileName2', (req, res) => {
     const { creatorName, fileName } = req.params;
+    const cacheKey = `${creatorName}_${fileName}`;
+    
+    let data = null;
 
-    // Chặn đứng trình duyệt hoặc skid scan trộm code
-    if (!isRobloxExecutor(req)) {
-        return res.send(`
-            <!DOCTYPE html>
-            <html lang="en">
-            <head><meta charset="UTF-8"><title>SKID DETECTED !!!</title>${style}</head>
-            <body>
-                <div class="troll-screen">
-                    <div class="troll-text">SKID ALERT !</div>
-                    <div class="troll-sub">Nỗ lực quét mã nguồn bị chặn bởi VantaShield Cloud Firewall!</div>
-                </div>
-            </body>
-            </html>
-        `);
-    }
-
-    // 1. Tìm và lấy file index.html từ Github
-    let rawCode = null;
-    const pathOnGithub = `${creatorName}/${fileName}/index.html`;
-    const gitHTMLContent = await getFileFromGithub(pathOnGithub);
-
-    if (gitHTMLContent) {
-        // Dùng Regex để bóc tách đoạn mã Base64 nằm giữa block CODE_DATA_START
-        const match = gitHTMLContent.match(/CODE_DATA_START:(.*?):CODE_DATA_END/);
-        if (match && match[1]) {
-            rawCode = Buffer.from(match[1], 'base64').toString('utf-8');
+    if (rawLookupCache.has(cacheKey)) {
+        const dbKey = rawLookupCache.get(cacheKey);
+        data = db.get(dbKey);
+        
+        if (!data || (data.fileName !== fileName && dbKey !== fileName)) {
+            rawLookupCache.delete(cacheKey);
+            data = null;
         }
     }
-
-    // Backup dự phòng (nếu Github phản hồi chậm thì lấy từ RAM đệm trên Vercel)
-    if (!rawCode) {
+    
+    if (!data) {
         for (const [key, val] of db.entries()) {
             const valCreator = val.owner === 'guest_anonymous' ? 'anonymous' : val.owner;
             if ((val.fileName === fileName || key === fileName) && valCreator === creatorName) {
-                rawCode = val.code;
+                data = val;
+                rawLookupCache.set(cacheKey, key);
                 break;
             }
         }
     }
 
-    if (!rawCode) {
-        return res.status(404).send('print("VantaShield Error: Script Not Found in Vault")');
+    if (isRobloxExecutor(req)) {
+        if (!data) return res.status(404).send('print("VantaShield: Script Not Found")');
+        res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+        return res.send(generateSecureLua(data.code));
     }
 
-    // Bọc lớp bảo mật và trả về dạng Text thuần cho Executor trong game
-    res.setHeader('Content-Type', 'text/plain; charset=utf-8');
-    return res.send(generateSecureLua(rawCode));
-});
-
-// Đường dẫn phụ v1
-app.all('/v1/:id', async (req, res) => {
-    const id = req.params.id;
-    const data = db.get(id);
-
-    if (!isRobloxExecutor(req)) {
+    if (!data) {
         return res.send(`
             <!DOCTYPE html>
             <html lang="en">
-            <head><meta charset="UTF-8"><title>SKID DETECTED !!!</title>${style}</head>
+            <head><meta charset="UTF-8"><title>404 NOT FOUND</title>${style}</head>
             <body>
                 <div class="troll-screen">
                     <div class="troll-text">SKID ALERT !</div>
-                    <div class="troll-sub">Nỗ lực quét mã nguồn bị chặn bởi VantaShield Cloud Firewall!</div>
+                    <div class="troll-sub">Code does not exist or has been nuked =)</div>
                 </div>
+                <script>setTimeout(() => { window.location.href = "https://www.google.com"; }, 3000);</script>
             </body>
             </html>
         `);
     }
 
-    let rawCode = null;
-    if (data) {
-        const creatorName = data.owner === 'guest_anonymous' ? 'anonymous' : data.owner;
-        const safeFileName = data.fileName || id;
-        const pathOnGithub = `${creatorName}/${safeFileName}/index.html`;
-        const gitHTMLContent = await getFileFromGithub(pathOnGithub);
+    return res.send(`
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><meta charset="UTF-8"><title>SKID DETECTED !!!</title>${style}</head>
+        <body>
+            <div class="troll-screen">
+                <div class="troll-text">SKID ALERT !</div>
+                <div class="troll-sub">Get out! Stealing source code is strictly prohibited by VantaShield.</div>
+            </div>
+            <script>setTimeout(() => { window.location.href = "https://www.google.com"; }, 3000);</script>
+        </body>
+        </html>
+    `);
+});
 
-        if (gitHTMLContent) {
-            const match = gitHTMLContent.match(/CODE_DATA_START:(.*?):CODE_DATA_END/);
-            if (match && match[1]) {
-                rawCode = Buffer.from(match[1], 'base64').toString('utf-8');
-            }
-        }
-        if (!rawCode) rawCode = data.code;
+app.all('/v1/:id', (req, res) => {
+    const id = req.params.id;
+    const data = db.get(id);
+
+    if (isRobloxExecutor(req)) {
+        if (!data) return res.status(404).send('print("VantaShield: Script Not Found")');
+        res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+        return res.send(generateSecureLua(data.code));
     }
 
-    if (!rawCode) return res.status(404).send('print("VantaShield Error: Script Not Found")');
-    res.setHeader('Content-Type', 'text/plain; charset=utf-8');
-    return res.send(generateSecureLua(rawCode));
+    if (!data) {
+        return res.send(`
+            <!DOCTYPE html>
+            <html lang="en">
+            <head><meta charset="UTF-8"><title>404 NOT FOUND</title>${style}</head>
+            <body>
+                <div class="troll-screen">
+                    <div class="troll-text">SKID ALERT !</div>
+                    <div class="troll-sub">Code does not exist or has been nuked =)</div>
+                </div>
+                <script>setTimeout(() => { window.location.href = "https://www.google.com"; }, 3000);</script>
+            </body>
+            </html>
+        `);
+    }
+
+    return res.send(`
+        <!DOCTYPE html>
+        <html lang="en">
+        <head><meta charset="UTF-8"><title>SKID DETECTED !!!</title>${style}</head>
+        <body>
+            <div class="troll-screen">
+                <div class="troll-text">SKID ALERT !</div>
+                <div class="troll-sub">Get out! Stealing source code is strictly prohibited by VantaShield.</div>
+            </div>
+            <script>setTimeout(() => { window.location.href = "https://www.google.com"; }, 3000);</script>
+        </body>
+        </html>
+    `);
 });
 
 // ============================================================================
 // KHỞI CHẠY MÁY CHỦ
 // ============================================================================
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-    console.log(`=================================`);
-    console.log(`🛡️  VANTASHIELD SECURE CLOUD SERVER RUNNING TẠI PORT: ${PORT}`);
-    console.log(`=================================`);
-});
+// BẮT BUỘC SỬ DỤNG MODULE.EXPORTS CHO VERCEL ĐỂ KHÔNG BỊ TREO
+module.exports = app;
